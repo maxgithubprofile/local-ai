@@ -1,44 +1,80 @@
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import type { FileSystemPort } from '../../core/ports/filesystem.port.js';
 
 /**
- * Not implemented — Phase 1/2 (ROADMAP.md). `node:fs`/`node:fs/promises`
- * implementation of {@link FileSystemPort} rooted at a temp directory —
- * used by `ModelRegistry`/`DownloadEngine` integration tests, TZ §13.1.
+ * `node:fs/promises` implementation of {@link FileSystemPort}, rooted at a
+ * fixed directory on disk — used by `DownloadEngine`/`ModelRegistry`
+ * integration tests, TZ §13.1. `resolvePath()` joins segments under that
+ * root; every other method expects a path this adapter itself produced
+ * (via `resolvePath()`) or an equivalent absolute path — it does not
+ * sandbox against traversal outside the root, matching the production
+ * `CapacitorFsAdapter`'s trust model (paths come from `local-ai`'s own
+ * code, never directly from untrusted input).
  */
 export class NodeFsAdapter implements FileSystemPort {
-  async exists(_path: string): Promise<boolean> {
-    throw new Error('not implemented — see TZ §13.1, ROADMAP Phase 1/2');
+  constructor(private readonly root: string) {}
+
+  resolvePath(...segments: string[]): string {
+    return path.join(this.root, ...segments);
   }
 
-  async mkdir(_path: string, _options?: { recursive?: boolean }): Promise<void> {
-    throw new Error('not implemented — see TZ §13.1, ROADMAP Phase 1/2');
+  async exists(filePath: string): Promise<boolean> {
+    try {
+      await fs.access(filePath);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
-  async writeFile(_path: string, _data: Uint8Array | string): Promise<void> {
-    throw new Error('not implemented — see TZ §13.1, ROADMAP Phase 1/2');
+  async mkdir(dirPath: string, options?: { recursive?: boolean }): Promise<void> {
+    await fs.mkdir(dirPath, { recursive: options?.recursive ?? false });
   }
 
-  async readFile(_path: string): Promise<Uint8Array> {
-    throw new Error('not implemented — see TZ §13.1, ROADMAP Phase 1/2');
+  async writeFile(filePath: string, data: Uint8Array | string): Promise<void> {
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, data);
   }
 
-  async *readChunks(_path: string, _chunkSizeBytes: number): AsyncIterable<Uint8Array> {
-    throw new Error('not implemented — see TZ §7.4, §13.1, ROADMAP Phase 1/2');
+  async readFile(filePath: string): Promise<Uint8Array> {
+    return new Uint8Array(await fs.readFile(filePath));
   }
 
-  async deleteFile(_path: string): Promise<void> {
-    throw new Error('not implemented — see TZ §13.1, ROADMAP Phase 1/2');
+  async *readChunks(filePath: string, chunkSizeBytes: number): AsyncIterable<Uint8Array> {
+    const handle = await fs.open(filePath, 'r');
+    try {
+      const buffer = Buffer.alloc(chunkSizeBytes);
+      for (;;) {
+        const { bytesRead } = await handle.read(buffer, 0, chunkSizeBytes, null);
+        if (bytesRead === 0) break;
+        yield new Uint8Array(buffer.subarray(0, bytesRead));
+      }
+    } finally {
+      await handle.close();
+    }
   }
 
-  async listFiles(_dirPath: string): Promise<string[]> {
-    throw new Error('not implemented — see TZ §13.1, ROADMAP Phase 1/2');
+  async deleteFile(filePath: string): Promise<void> {
+    await fs.rm(filePath, { force: true });
   }
 
-  async stat(_path: string): Promise<{ sizeBytes: number } | null> {
-    throw new Error('not implemented — see TZ §13.1, ROADMAP Phase 1/2');
+  async listFiles(dirPath: string): Promise<string[]> {
+    try {
+      return await fs.readdir(dirPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw err;
+    }
   }
 
-  resolvePath(..._segments: string[]): string {
-    throw new Error('not implemented — see TZ §13.1, ROADMAP Phase 1/2');
+  async stat(filePath: string): Promise<{ sizeBytes: number } | null> {
+    try {
+      const s = await fs.stat(filePath);
+      return { sizeBytes: s.size };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw err;
+    }
   }
 }

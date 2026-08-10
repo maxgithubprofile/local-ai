@@ -101,24 +101,39 @@ and a fully-implemented + unit-tested `evaluateEligibility()`. Remaining:
 
 Depends on: 0.3 (transport choice), 0.6 (hashing perf expectations).
 
-- [ ] **2.1 `WebCryptoHashAdapter`** (`src/adapters/node-testing/web-crypto-hash.adapter.ts`) —
-  implement `sha256`/`createSha256` over `node:crypto`'s webcrypto; confirm it also works unmodified
-  as the production adapter (TZ §7.4) or split it if not.
-  - [ ] **2.1a `checksum.ts`** — implement `verifyChecksum()` using `HashPort` + `FileSystemPort.readChunks`.
-- [ ] **2.2 `NodeRangeDownloadAdapter`** — real `Range:`-request implementation for the mock-HTTP
-  test harness described in TZ §7.3.
-- [ ] **2.3 Mock HTTP test server** (`test/integration/download/`) that can drop connections,
-  change `ETag`, or omit `Accept-Ranges` on demand.
-- [ ] **2.4 `DownloadEngine`** (`src/core/download/download-engine.ts`) — orchestration per TZ §7's
-  pseudocode: state load-or-create, short-circuit already-verified, retry w/ backoff, checksum on
-  completion.
-- [ ] **2.5 `download_state` persistence** wired through `SqlitePort` (needs 3.x's `Database`
-  migration runner, or a minimal standalone runner pulled forward — decide when starting this task).
-- [ ] **2.6 `CapgoDownloaderAdapter`** — real implementation per the 0.3 ADR's confirmed API.
+- [x] **2.1 `WebCryptoHashAdapter`** (`src/adapters/node-testing/web-crypto-hash.adapter.ts`) —
+  implemented over `node:crypto`'s classic `createHash('sha256')` (genuinely incremental,
+  `.update()`/`.digest()`; `webcrypto.subtle.digest()` is Promise-based with no incremental
+  primitive, would force full-file buffering — see the class's doc comment) — also used unmodified
+  as the production adapter (TZ §7.4), no split needed. **Done 2026-08-10.**
+  - [x] **2.1a `checksum.ts`** — `verifyChecksum()` using `HashPort` + `FileSystemPort.readChunks`,
+    with an `onProgress(bytesHashed)` callback per the 0006 ADR's incremental-progress decision.
+    **Done 2026-08-10.**
+- [x] **2.2 `NodeRangeDownloadAdapter`** — real `Range:`-request implementation (`fetch` + manual
+  `Range: bytes=start-`); resumes from existing on-disk bytes on every `start()`/`resume()`, restarts
+  from scratch if the server ignores the Range header (no `Accept-Ranges`). **Done 2026-08-10.**
+- [x] **2.3 Mock HTTP test server** (`test/integration/download/mock-http-server.ts`) — one-shot
+  connection drop at a given byte offset, toggleable `ETag`/`Accept-Ranges`. **Done 2026-08-10.**
+- [x] **2.4 `DownloadEngine`** (`src/core/download/download-engine.ts`) — orchestration per TZ §7's
+  pseudocode: state load-or-create, short-circuit already-verified+file-exists, retry w/ configurable
+  backoff via repeated `transport.start()` (resume-capable by construction, not a separate code path),
+  checksum verification + `ChecksumMismatchError` + file deletion on mismatch. **Done 2026-08-10.**
+- [x] **2.5 `download_state` persistence** wired through `SqlitePort`/`Database` (pulled forward into
+  Phase 1, see that section's note). **Done 2026-08-10.**
+- [x] **2.6 `CapgoDownloaderAdapter`** — real implementation per the 0.3 ADR's confirmed API; `stop()`
+  maps to the plugin's `pause()` instead of `stop()` when `discardPartial: false`, since the real
+  plugin's `stop()` always deletes data (no "keep partial" option). Untestable from this environment
+  (no device) — implemented against the plugin's real shipped `.d.ts`, not exercised end-to-end.
+  **Done 2026-08-10.** Also implemented while in this area (small, same pattern, needed regardless):
+  `CapacitorFsAdapter` (`@capacitor/filesystem`, base64 bridge, from-scratch codec to avoid a DOM
+  `lib` dependency), `CapacitorPlatformSupportAdapter`, `CapgoDeviceInfoAdapter` (ADR 0004's design).
 
 **Phase 2 exit criterion (TZ §15):** contract test "resume after 50% cutoff → sha256 valid" green
 (`test/contract/download-transport.contract.ts`, parametrized over `NodeRangeDownloadAdapter` and,
-if a device is available, `CapgoDownloaderAdapter`).
+if a device is available, `CapgoDownloaderAdapter`). **Status: met for `NodeRangeDownloadAdapter`** —
+green both at the transport-contract level and end-to-end through `DownloadEngine`
+(`test/integration/download/download-engine.test.ts`); `CapgoDownloaderAdapter` parametrization
+deferred to real-device testing, same residual-risk pattern as ADR 0003.
 
 ---
 
