@@ -1,0 +1,183 @@
+Ниже — полная инструкция для JS/Capacitor‑разработчика на русском с учётом двух языков (RU/EN) и одного большого RAG‑корпуса.
+
+0. Общая идея (одним абзацем)
+Мы делаем офлайн‑ассистента на телефоне, который:
+• запускает локальную LLM‑модель через llama-cpp-capacitor (GGUF‑файл на устройстве);[classic.yarnpkg]
+• хранит большую SQLite‑базу с заранее посчитанными эмбеддингами документов;[github]
+• при вопросе пользователя:
+локально векторизует текст вопроса,
+ищет ближайшие документы в SQLite (vector search),
+подставляет найденные фрагменты в промпт и
+генерирует ответ локальной моделью.
+Корпус и эмбеддинги готовит другая команда — ты их только читаешь.
+
+1. Что уже готово (ты это просто получаешь)
+От ML/бэкенд‑команды ты получаешь:
+1. SQLite‑файл knowledge.db (один общий):
+• Таблица chunks(id INTEGER PRIMARY KEY, text TEXT, …) — фрагменты документов на русском и английском.
+• Таблица/виртуальная таблица doc_embeddings с эмбеддингами:
+столбец embedding (VECTOR / BLOB),
+столбец chunk_id,
+внутри уже настроен векторный индекс через расширение типа sqlite-vec / sqlite-vss / sqlite-vector.[github]
+2. GGUF‑файл LLM‑модели, например:
+Многоязычная модель вроде Qwen3‑4B‑Instruct или её производный чекпоинт (поддержка 100+ языков, включая русский).[qwenlm.github]
+3. (Опционально) GGUF‑файл эмбеддинг‑модели, если эмбеддер отдельный от LLM.
+
+2. Требования к моделям (важно для многоязычности)
+• LLM‑модель должна быть многоязычной
+Пример: Qwen3-4B-Instruct — в официальном описании указана поддержка более 100 языков (английский, русский и др.).[qwenlm.github]
+• Эмбеддинг‑модель тоже должна быть многоязычной
+Документы и запросы в русском и английском должны кодироваться одной и той же моделью эмбеддингов.
+Пример: серия Qwen3-Embedding (0.6B/4B/8B) — многоязычные текстовые эмбеддеры, показавшие SOTA на мультиязычных бенчмарках.[arxiv]
+ML‑команда уже гарантирует это на своей стороне; тебе важно просто использовать указанные ими файлы GGUF.
+
+3. Интеграция llama-cpp-capacitor
+3.1. Установка
+bash
+
+
+npm install llama-cpp-capacitor
+npx cap sync3.2. Инициализация модели при старте приложения
+1. При первом запуске:
+Скопировать knowledge.db и .gguf‑модель(и) из бандла или после скачивания в директорию данных приложения.
+2. На старте (например, в App / main):
+ts
+
+
+import { initLlama } from 'llama-cpp-capacitor';
+
+const llamaCtx = await initLlama({
+  model: modelPathOnDevice,   // путь к .gguf
+  n_ctx: 4096,                // контекст, можно подправить
+  n_threads: 4,               // число потоков
+  n_gpu_layers: 0,            // GPU-слои (iOS/Android, по возможностям)
+});Теперь через llamaCtx ты можешь:
+
+получать эмбеддинги текста: llamaCtx.embedding(text);
+генерировать текст: llamaCtx.completion(params, onToken).[classic.yarnpkg]
+
+
+4. Работа с SQLite и векторным поиском
+4.1. Открытие knowledge.db
+Открываешь knowledge.db с помощью:
+
+либо Capacitor‑плагина к SQLite,
+либо нативного модуля (Kotlin/Swift) с простым JS‑API.
+Предполагаем, что в базе есть:
+sql
+
+
+CREATE TABLE chunks (
+  id   INTEGER PRIMARY KEY,
+  text TEXT
+  -- ... любые метаданные
+);
+
+/* doc_embeddings — виртуальная таблица из расширения vector search */
+CREATE VIRTUAL TABLE doc_embeddings USING vec0(
+  chunk_id INTEGER,
+  embedding FLOAT[384]  -- пример
+);(точная схема — от ML‑команды, тебе дадут SQL/доки).
+4.2. JS/TS‑API для поиска
+С JS‑стороны хочется иметь что‑то такое:
+ts
+
+
+// Векторный поиск по заранее построенному индексу
+const hits = await VectorDb.search({
+  queryEmbedding: Float32Array,  // эмбеддинг запроса
+  topK: 8,
+});
+// → [{ chunkId: number, score: number }, ...]
+
+// Дозагрузка текстов чанков
+const docs = await VectorDb.loadChunks(hits.map(h => h.chunkId));
+// → [{ id, text, ... }, ...]На нативной стороне search внутри исполняет SQL через расширение, например:
+sql
+
+
+SELECT chunk_id, distance
+FROM doc_embeddings
+WHERE embedding MATCH :queryEmbedding
+ORDER BY distance
+LIMIT :topK;
+
+5. Полный цикл RAG для одного запроса
+Пусть пользователь вводит вопрос на русском или английском.
+5.1. Эмбеддинг запроса (локально)
+ts
+
+
+const embRes = await llamaCtx.embedding(userQuestion);
+const queryEmbedding = embRes.embedding; // Float32ArrayВажно: ML‑команда посчитала эмбеддинги документов той же моделью эмбеддингов, что используется для запросов, либо teacher–student‑парой, совместимой по пространству векторов.[arxiv]
+5.2. Векторный поиск по корпусу
+ts
+
+
+const hits = await VectorDb.search({
+  queryEmbedding,
+  topK: 8,
+});
+
+const docs = await VectorDb.loadChunks(hits.map(h => h.chunkId));
+// docs: [{ id, text, ... }, ...]Часто достаточно topK 8–12; детали подберём потом.
+5.3. Формирование промпта (с учётом языка)
+LLM должна:
+
+использовать ТОЛЬКО эти документы,
+отвечать на том же языке, на котором задан вопрос.
+Пример system‑сообщения:
+text
+
+
+You are an assistant that answers ONLY from the provided documents.
+Always answer in the same language as the user's question (Russian or English).
+If the answer is not in the documents, say you don't know.(Можно сделать многоязычную формулировку, но логика такая.)
+Сборка полного промпта:
+ts
+
+const
+ contextText = docs
+  .map((d, i) => `[Document ${i + 1}]\n${d.text}`)
+  .join('\n\n');
+
+const prompt = `
+You are an assistant that answers ONLY from the provided documents.
+Always answer in the same language as the user's question (Russian or English).
+If the answer is not in the documents, say you don't know.
+
+${contextText}
+
+Question: ${userQuestion}
+`;5.4. Генерация ответа локальной LLM
+Используем стриминг токенов для плавного UX:
+ts
+
+
+let answer = "";
+
+await llamaCtx.completion(
+  {
+    prompt,
+    n_predict: 256,
+    temperature: 0.2,
+  },
+  token => {
+    answer += token.token;
+    // обновляем UI по мере прихода токенов
+  },
+);
+
+showAnswer(answer);Модель сама определит, на каком языке отвечать — по тексту вопроса.
+
+6. Что важно помнить разработчику
+• Языки (RU/EN) не требуют другой архитектуры. Векторы — просто числа;
+многоязычность обеспечивается выбором моделей (LLM + эмбеддер).
+• Код, который ты пишешь, одинаковый для русского и английского —
+разница только в содержимом userQuestion и текстах в chunks.text.
+• Вся тяжёлая работа (обучение, подготовка knowledge.db, подбор моделей) делается ML‑командой.
+Твоя задача: правильно вызвать embedding(), search в SQLite и completion().
+
+Коротко одной фразой
+«На устройстве у нас одна многоязычная модель, один большой SQLite‑корпус с заранее посчитанными векторами, и один алгоритм: векторизуем вопрос → ищем похожие куски в базе → подставляем их в промпт → генерируем ответ на том же языке.»classic.yarnpkg.comYarnFast, reliable, and secure dependency management.QwenQwen3: Think Deeper, Act FasterQWEN CHAT GitHub Hugging Face ModelScope Kaggle DEMO DISCORD
+Introduction Today, we are excited to announce the release of Qwen3, the latest addition to the Qwen family of large language models. Our flagship model, Qwen3-235B-A22B, achieves competitive results in benchmark evaluations of coding, math, general capabilities, etc., when compared to other top-tier models such as DeepSeek-R1, o1, o3-mini, Grok-3, and Gemini-2.5-Pro. Additionally, the small MoE model, Qwen3-30B-A3B, outcompetes QwQ-32B with 10 times of activated parameters, and even a tiny model like Qwen3-4B can rival the performance of Qwen2.Apr 28th, 2025

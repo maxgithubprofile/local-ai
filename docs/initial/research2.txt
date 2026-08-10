@@ -1,0 +1,289 @@
+Для приложения русский и английский — просто два языка в одном общем RAG‑потоке:
+
+```text
+Вопрос пользователя
+        ↓
+многоязычная embedding-модель
+        ↓
+вектор запроса
+        ↓
+поиск по SQLite с векторами русских и английских чанков
+        ↓
+найденные тексты
+        ↓
+многоязычная LLM
+        ↓
+ответ на языке вопроса
+```
+
+## 1. Как векторы связывают русский и английский
+
+При подготовке корпуса каждый фрагмент проходит через одну и ту же **многоязычную embedding-модель**:
+
+```text
+Русский chunk  → [0.12, -0.44, 0.08, ...]
+English chunk  → [0.10, -0.42, 0.09, ...]
+```
+
+Если два фрагмента имеют похожее значение, их векторы должны находиться близко друг к другу, даже если один написан по-русски, а другой по-английски. Затем вопрос пользователя также превращается в вектор, и SQLite ищет ближайшие векторы по расстоянию.
+
+Например:
+
+```text
+Вопрос:  "Как оказать помощь при переохлаждении?"
+Документ: "First aid for hypothermia includes..."
+```
+
+Многоязычный embedding‑модель должна понять, что эти тексты относятся к одной теме, и вернуть английский фрагмент среди результатов. Qwen3 заявляет поддержку 119 языков и диалектов, включая русский и английский; для этого сценария нужна именно embedding‑модель с cross‑lingual retrieval, а не английский‑only embedder. [qwenlm.github](https://qwenlm.github.io/blog/qwen3/)
+
+## 2. Что происходит на телефоне
+
+На устройство скачиваются:
+
+- `knowledge.db` — готовая SQLite‑база с русскими и английскими чанками и их векторами;
+- `embedding-model.gguf` — локальная multilingual embedding‑модель;
+- `llm-model.gguf` — локальная multilingual Qwen‑модель для генерации ответов.
+
+Когда пользователь задаёт вопрос:
+
+```ts
+const result = await embeddingContext.embedding(userQuestion);
+const queryVector = result.embedding;
+```
+
+Вопрос может быть на любом из двух языков. Затем приложение передаёт `queryVector` в нативный SQLite vector search:
+
+```ts
+const hits = await VectorDb.search({
+  queryEmbedding: queryVector,
+  topK: 8,
+});
+```
+
+SQLite не знает, русский это вопрос или английский. Для него это только массив чисел. Он возвращает ID наиболее близких чанков:
+
+```text
+chunk 183 — русский документ — distance 0.18
+chunk 902 — English document — distance 0.21
+chunk 417 — русский документ — distance 0.24
+```
+
+После этого приложение загружает тексты этих чанков и добавляет их в prompt для LLM.
+
+## 3. На каком языке будет ответ
+
+В prompt нужно явно указать правило языка:
+
+```text
+You are a multilingual assistant.
+
+Answer only using the provided documents.
+Answer in the same language as the user's question:
+- Russian question → answer in Russian.
+- English question → answer in English.
+
+The documents may contain Russian, English, or both languages.
+You may use information from documents written in either language.
+Do not invent information that is not supported by the documents.
+If the documents do not contain the answer, say so clearly.
+```
+
+Пример:
+
+```ts
+const contextText = docs
+  .map((doc, index) => `[Document ${index + 1}]\n${doc.text}`)
+  .join("\n\n");
+
+const prompt = `
+You are a multilingual assistant.
+
+Answer only using the provided documents.
+Answer in the same language as the user's question.
+The documents may be in Russian or English.
+You may use relevant documents in either language.
+If the answer is not supported by the documents, say so clearly.
+
+Documents:
+${contextText}
+
+User question:
+${userQuestion}
+`;
+```
+
+Если вопрос на русском, модель должна сформулировать ответ по-русски, даже если лучший найденный источник оказался на английском.
+
+## 4. Важное разделение моделей
+
+В вашей архитектуре лучше считать, что используются **две разные модели**:
+
+| Задача | Модель |
+|---|---|
+| Найти релевантные документы | Multilingual embedding model |
+| Сформулировать ответ | Uncensored multilingual Qwen LLM |
+
+Например:
+
+```text
+embedding-model.gguf
+    → только векторы
+
+qwen3-4b-uncensored.gguf
+    → только ответы
+```
+
+Не следует автоматически использовать embedding‑функцию обычной chat‑модели Qwen3‑4B. Для embedding‑моделей важны специальное обучение для retrieval, способ pooling и нормализация векторов. Документация llama.cpp также различает sequence‑level embeddings и обычные token‑level представления; embedding‑модели обычно специально настроены для получения одного вектора на весь текст. [llama-cpp-python.readthedocs](https://llama-cpp-python.readthedocs.io/en/stable/)
+
+То есть в Capacitor желательно инициализировать два контекста:
+
+```ts
+const embeddingCtx = await initLlama({
+  model: embeddingModelPath,
+  embedding: true,
+  n_ctx: 512,
+  n_threads: 4,
+  n_gpu_layers: 0,
+});
+
+const llmCtx = await initLlama({
+  model: llmModelPath,
+  n_ctx: 4096,
+  n_threads: 4,
+  n_gpu_layers: 0,
+});
+```
+
+Затем:
+
+```ts
+const embeddingResult =
+  await embeddingCtx.embedding(userQuestion);
+
+const hits = await VectorDb.search({
+  queryEmbedding: embeddingResult.embedding,
+  topK: 8,
+});
+
+const docs =
+  await VectorDb.loadChunks(hits.map(hit => hit.chunkId));
+
+const answer =
+  await llmCtx.completion({
+    prompt: buildPrompt(userQuestion, docs),
+    temperature: 0.2,
+    n_predict: 256,
+  });
+```
+
+Точная поддержка конкретной embedding‑модели в `llama-cpp-capacitor` должна быть проверена отдельно: модель должна корректно конвертироваться в GGUF и работать в embedding‑режиме llama.cpp. llama.cpp поддерживает embedding‑модели в GGUF и может запускать их через embedding API или embedding server. [github](https://github.com/ggml-org/llama.cpp/discussions/7712)
+
+## 5. Главное условие совместимости
+
+Векторы документов и вектор запроса должны быть созданы:
+
+- той же embedding‑моделью;
+- с тем же tokenizer;
+- с тем же pooling;
+- с той же нормализацией;
+- с той же размерностью;
+- по возможности с теми же instruction/prompt‑шаблонами.
+
+Например, нельзя сделать так:
+
+```text
+Документы: Qwen3-Embedding-8B
+Запросы:   Qwen3-Embedding-0.6B
+```
+
+и предполагать, что они автоматически совместимы. Даже если модели принадлежат к одной серии, их векторные пространства не обязаны совпадать. Это станет корректным только если конкретная модельная документация прямо гарантирует совместимое пространство или если была выполнена специальная distillation/teacher–student подготовка.
+
+Для простого и надёжного первого варианта лучше использовать:
+
+```text
+Документы: Qwen3-Embedding-0.6B
+Запросы:   тот же Qwen3-Embedding-0.6B в GGUF
+```
+
+Тогда backend и Capacitor используют одну модель и один алгоритм. Более крупную embedding‑модель можно применять для экспериментов, но только после проверки совместимости или отдельной системы преобразования векторов.
+
+## 6. Как проверить, что RU/EN действительно работают
+
+До публикации нужно проверить минимум четыре сценария:
+
+- русский вопрос → русский релевантный документ;
+- английский вопрос → английский релевантный документ;
+- русский вопрос → английский документ с тем же смыслом;
+- английский вопрос → русский документ с тем же смыслом.
+
+Например:
+
+```json
+[
+  {
+    "id": "ru_to_ru",
+    "query": "Как оказать первую помощь при переохлаждении?",
+    "expected_language": "ru",
+    "expected_document_ids": ["first-aid-ru-12"]
+  },
+  {
+    "id": "en_to_en",
+    "query": "How should hypothermia be treated?",
+    "expected_language": "en",
+    "expected_document_ids": ["first-aid-en-08"]
+  },
+  {
+    "id": "ru_to_en",
+    "query": "Какие признаки переохлаждения?",
+    "expected_language": "ru",
+    "expected_document_ids": ["first-aid-en-08"]
+  },
+  {
+    "id": "en_to_ru",
+    "query": "What are the symptoms of hypothermia?",
+    "expected_language": "en",
+    "expected_document_ids": ["first-aid-ru-12"]
+  }
+]
+```
+
+В batch‑тесте нужно сохранять не только найденные тексты, но и:
+
+```json
+{
+  "query": "Какие признаки переохлаждения?",
+  "query_language": "ru",
+  "hits": [
+    {
+      "chunk_id": 123,
+      "document_language": "en",
+      "distance": 0.21,
+      "text": "..."
+    }
+  ],
+  "cross_lingual": true
+}
+```
+
+Так вы увидите, работает ли именно cross‑lingual retrieval, а не только поиск внутри одного языка.
+
+## Коротко
+
+Для русского и английского ничего принципиально нового в архитектуре не нужно:
+
+```text
+RU/EN corpus
+    → одна multilingual embedding-модель
+    → векторы в knowledge.db
+
+RU/EN user query
+    → та же embedding-модель на устройстве
+    → поиск по тем же векторам
+
+найденные RU/EN chunks
+    → uncensored multilingual Qwen LLM
+    → ответ на языке вопроса
+```
+
+Критически важно не то, что корпус смешанный, а то, что **backend и мобильное приложение используют действительно совместимую multilingual embedding‑модель и одинаковый embedding pipeline**.QwenQwen3: Think Deeper, Act FasterQWEN CHAT GitHub Hugging Face ModelScope Kaggle DEMO DISCORD
+Introduction Today, we are excited to announce the release of Qwen3, the latest addition to the Qwen family of large language models. Our flagship model, Qwen3-235B-A22B, achieves competitive results in benchmark evaluations of coding, math, general capabilities, etc., when compared to other top-tier models such as DeepSeek-R1, o1, o3-mini, Grok-3, and Gemini-2.5-Pro. Additionally, the small MoE model, Qwen3-30B-A3B, outcompetes QwQ-32B with 10 times of activated parameters, and even a tiny model like Qwen3-4B can rival the performance of Qwen2.

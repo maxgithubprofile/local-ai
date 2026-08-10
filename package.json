@@ -1,0 +1,72 @@
+{
+  "name": "local-ai",
+  "version": "0.0.0",
+  "description": "TS/Capacitor library for an offline LLM + embedding assistant (local model, local SQLite, local vector search, multi-chat conversations). See docs/2026-08-10-local-ai-library-tz.md.",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=18.18"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/core/index.d.ts",
+      "import": "./dist/core/index.js",
+      "require": "./dist/core/index.cjs"
+    },
+    "./adapters/capacitor": {
+      "types": "./dist/adapters/capacitor/index.d.ts",
+      "import": "./dist/adapters/capacitor/index.js",
+      "require": "./dist/adapters/capacitor/index.cjs"
+    },
+    "./adapters/node-testing": {
+      "types": "./dist/adapters/node-testing/index.d.ts",
+      "import": "./dist/adapters/node-testing/index.js",
+      "require": "./dist/adapters/node-testing/index.cjs"
+    }
+  },
+  "main": "./dist/core/index.cjs",
+  "module": "./dist/core/index.js",
+  "types": "./dist/core/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "test": "npm run lint && npm run typecheck && npm run test:unit && npm run test:integration",
+    "test:unit": "vitest run --dir test/unit --passWithNoTests",
+    "test:integration": "vitest run --dir test/integration --passWithNoTests",
+    "test:contract": "vitest run --dir test/contract --passWithNoTests",
+    "test:watch": "vitest",
+    "docs": "typedoc"
+  },
+  "peerDependencies": {
+    "@capacitor/core": ">=8.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@capacitor/core": {
+      "optional": true
+    }
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.9.0",
+    "@types/node": "^22.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "eslint": "^9.9.0",
+    "eslint-plugin-jsdoc": "^48.11.0",
+    "tsup": "^8.2.0",
+    "typedoc": "^0.26.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}

@@ -1,0 +1,12 @@
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+.env
+.env.*
+*.gguf
+*.tsbuildinfo
+.vitest-cache/
+/docs/typedoc/
+.claude/settings.local.json

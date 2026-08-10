@@ -1,0 +1,310 @@
+Есть один реально важный архитектурный вопрос: sendMessage()
+
+Вот это API:
+
+sendMessage(...):
+  AsyncIterable<CompletionToken> & Promise<ChatMessage>
+
+мне не нравится.
+
+Технически это можно сделать через специальный hybrid object, но это очень неудобный API.
+
+Получается что-то вроде:
+
+const result = client.sendMessage(...)
+
+for await (const token of result) {
+   ...
+}
+
+const message = await result
+
+Это не очевидно для пользователя библиотеки и сложнее реализуется/тестируется.
+
+Я бы сделал проще:
+
+sendMessage(
+  chatId,
+  text,
+  options
+): AsyncIterable<CompletionToken>
+
+а финальное сообщение получать событием/методом либо сделать объект:
+
+const response = client.sendMessage(...)
+
+response.onToken(...)
+response.done
+response.result
+
+Например:
+
+const stream = client.sendMessage("chat-1", "Hello")
+
+for await (const token of stream) {
+  render(token)
+}
+
+const message = await stream.result
+
+Это гораздо понятнее.
+
+4. Я бы упростил режим B
+
+Вот эта часть:
+
+приложение само является source of truth, а local-ai — зеркало контекста
+
+архитектурно интересная. Но для первой версии она сильно раздувает API.
+
+Сейчас появляются:
+
+createChat
+upsertChat
+appendMessages
+sendMessage
+getMessages
+...
+
+и довольно сложная семантика идемпотентности.
+
+При этом это уже отдельный продуктовый use-case.
+
+Я бы MVP сделал:
+
+createChat()
+listChats()
+deleteChat()
+getMessages()
+sendMessage()
+
+И всё.
+
+А:
+
+upsertChat()
+appendMessages()
+
+вынес бы в advanced conversation sync.
+
+Потому что сейчас разработчик должен реализовать практически две модели владения данными одновременно.
+
+
+Есть более серьёзная проблема с embedding
+
+Ты правильно решил сделать embedding независимым.
+
+Но вот эта логика:
+
+embedding changed
+       ↓
+event
+       ↓
+application decides what to do
+
+опасна.
+
+Потому что можно получить:
+
+vectors:
+  model v1 / embedding v1
+
+current embedding:
+  v2
+
+search():
+  query → embedding v2
+  DB → vectors v1
+
+И технически всё работает.
+
+Но результаты семантически неправильные.
+
+В ТЗ это осознано описано как риск.
+
+Я бы добавил более сильный механизм:
+
+vector_space_id
+embedding_id
+embedding_version
+dimensions
+
+к каждой vector collection.
+
+Тогда search() при несовместимом embedding не сможет молча выполнить поиск.
+
+Например:
+
+VectorSpaceMismatchError
+
+Это намного безопаснее, чем надеяться на обработку события приложением.
+
+
+unloadAll() — хорошо, но я бы не обещал слишком много
+
+Сейчас формулировка хорошая:
+
+освобождаются runtime contexts, caches сбрасываются, DB по желанию закрывается.
+
+И хорошо, что прямо указано:
+
+это не гарантирует мгновенный возврат памяти ОС.
+
+Это надо оставить.
+
+Я бы только изменил концепцию:
+
+unloadAll()
+
+на более точное:
+
+releaseRuntime()
+
+а unloadAll() оставить alias.
+
+Потому что "unload all" может восприниматься как:
+
+удалить всё из памяти + диска + кешей + состояния.
+
+А реально:
+
+release native contexts
+clear RAM caches
+keep persistent data
+keep session files
+keep downloads
+keep DB
+
+
+
+Самое важное, чего не хватает — inference configuration
+
+Вот это я бы добавил обязательно.
+
+В ТЗ есть:
+
+complete(input)
+
+но я не вижу достаточно явно определённой модели параметров инференса.
+
+Нужно хотя бы:
+
+interface CompletionOptions {
+  temperature?: number
+  topP?: number
+  topK?: number
+  maxTokens?: number
+  repeatPenalty?: number
+  seed?: number
+  stop?: string[]
+}
+
+и, возможно:
+
+systemPrompt
+
+Но главное — где хранится conversation template / chat template.
+
+Для GGUF это очень важно.
+
+Потому что:
+
+Qwen
+Llama
+Gemma
+Mistral
+
+не обязательно должны собираться одинаковым способом.
+
+Я бы не позволял application самостоятельно формировать сырой prompt.
+
+Лучше:
+
+Model metadata
+       ↓
+chat template
+       ↓
+RuntimeFacade
+       ↓
+llama.cpp
+10. Нужен явный memory/context policy
+
+Это, на мой взгляд, самый большой недостающий функциональный пункт.
+
+Есть:
+
+contextLength
+
+но что происходит, если чат содержит:
+
+100k tokens
+
+а модель поддерживает:
+
+32k
+
+?
+
+Сейчас написано "собрать историю целиком", что потенциально невозможно. В sendMessage() прямо описан cold-start через всю историю.
+
+Нужна политика:
+
+contextStrategy:
+  | 'fail'
+  | 'truncate-oldest'
+  | 'truncate-to-fit'
+
+или хотя бы:
+
+maxContextTokens
+
+И желательно:
+
+system
+↓
+recent messages
+↓
+older messages removed
+
+Без этого первая же длинная переписка станет проблемой.
+
+11. Ещё одна вещь — cancellation
+
+AbortSignal уже есть — отлично.
+
+Но надо зафиксировать семантику.
+
+Например:
+
+sendMessage()
+   ↓
+user cancels
+   ↓
+partial assistant response
+
+Что происходит?
+
+В БД сохраняется:
+
+assistant: "Hello, I think..."
+
+или не сохраняется вообще?
+
+Сейчас это не до конца определено.
+
+Я бы сделал:
+
+user message → всегда сохраняется
+
+assistant message →
+  сохраняется только после successful completion
+
+и при cancellation:
+
+assistant message не сохраняется
+
+либо отдельный статус:
+
+partial / cancelled
+
+Но это нужно решить.

@@ -1,0 +1,44 @@
+import type { FileSystemPort } from '../../core/ports/filesystem.port.js';
+
+/**
+ * Not implemented — Phase 1/2 (ROADMAP.md). `node:fs`/`node:fs/promises`
+ * implementation of {@link FileSystemPort} rooted at a temp directory —
+ * used by `ModelRegistry`/`DownloadEngine` integration tests, TZ §13.1.
+ */
+export class NodeFsAdapter implements FileSystemPort {
+  async exists(_path: string): Promise<boolean> {
+    throw new Error('not implemented — see TZ §13.1, ROADMAP Phase 1/2');
+  }
+
+  async mkdir(_path: string, _options?: { recursive?: boolean }): Promise<void> {
+    throw new Error('not implemented — see TZ §13.1, ROADMAP Phase 1/2');
+  }
+
+  async writeFile(_path: string, _data: Uint8Array | string): Promise<void> {
+    throw new Error('not implemented — see TZ §13.1, ROADMAP Phase 1/2');
+  }
+
+  async readFile(_path: string): Promise<Uint8Array> {
+    throw new Error('not implemented — see TZ §13.1, ROADMAP Phase 1/2');
+  }
+
+  async *readChunks(_path: string, _chunkSizeBytes: number): AsyncIterable<Uint8Array> {
+    throw new Error('not implemented — see TZ §7.4, §13.1, ROADMAP Phase 1/2');
+  }
+
+  async deleteFile(_path: string): Promise<void> {
+    throw new Error('not implemented — see TZ §13.1, ROADMAP Phase 1/2');
+  }
+
+  async listFiles(_dirPath: string): Promise<string[]> {
+    throw new Error('not implemented — see TZ §13.1, ROADMAP Phase 1/2');
+  }
+
+  async stat(_path: string): Promise<{ sizeBytes: number } | null> {
+    throw new Error('not implemented — see TZ §13.1, ROADMAP Phase 1/2');
+  }
+
+  resolvePath(..._segments: string[]): string {
+    throw new Error('not implemented — see TZ §13.1, ROADMAP Phase 1/2');
+  }
+}

@@ -1,0 +1,80 @@
+import type { ManifestDiff } from './manifest/manifest.diff.js';
+import type { DownloadProgress } from './download/download-state.js';
+import type { EligibilityReport } from './support/types.js';
+import type { ChatMessage } from './conversations/conversation.types.js';
+
+/** Sampling/generation parameters — TZ §10.0. */
+export interface CompletionOptions {
+  temperature?: number;
+  topP?: number;
+  topK?: number;
+  maxTokens?: number;
+  repeatPenalty?: number;
+  seed?: number;
+  stop?: string[];
+}
+
+/**
+ * Only structured messages — the library NEVER accepts a raw prompt
+ * string, so a model swap in the manifest can't silently degrade quality
+ * because the app hand-rolled its own chat-template glue. See TZ §4.1.
+ */
+export interface CompletionInput {
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
+  options?: CompletionOptions;
+}
+
+/** Non-streaming completion result — TZ §10.0. */
+export interface CompletionResult {
+  content: string;
+  status: 'complete' | 'cancelled' | 'error';
+  tokenCount?: number;
+}
+
+/** One streamed token as seen by a `for await` subscriber — TZ §10.0. */
+export interface CompletionToken {
+  token: string;
+  /** Text accumulated since generation start — saves the subscriber from concatenating itself. */
+  accumulatedContent: string;
+}
+
+/**
+ * Explicit replacement for a hybrid `AsyncIterable & Promise` (rejected in
+ * `docs/corrections.txt` as awkward to implement/test reliably) — TZ §9.2,
+ * §10.0. `result` resolves after the stream fully drains — success,
+ * cancellation, and mid-generation errors all *resolve* (never reject) with
+ * a final value carrying the corresponding `status`, see TZ §9.8. `result`
+ * only *rejects* when generation couldn't start at all
+ * (`RuntimeBusyError`/`ContextWindowExceededError`).
+ */
+export interface CompletionStream<TResult> extends AsyncIterable<CompletionToken> {
+  readonly result: Promise<TResult>;
+}
+
+/** Event payloads for `LocalAiClient.on()` — TZ §10.1. */
+export interface LocalAiEventMap {
+  'manifest:updated': ManifestDiff;
+  'manifest:invalid': { error: Error };
+  'device:eligibility-warning': EligibilityReport;
+  'download:progress': DownloadProgress;
+  'download:completed': { key: string; kind: 'model' | 'embedding' };
+  'download:failed': { key: string; kind: 'model' | 'embedding'; error: Error };
+  'runtime:model-loaded': { modelId: string; version: number };
+  'runtime:embedding-loaded': { embeddingId: string; version: number };
+  'runtime:unloaded': { reason: 'manual' | 'background' | 'model-switch' | 'embedding-switch' };
+  'vector-store:fallback-active': { reason: string };
+  'vector-store:embedding-changed': {
+    previous?: { id: string; version: number; dimensions: number };
+    current: { id: string; version: number; dimensions: number };
+    dimensionsChanged: boolean;
+  };
+  'chat:created': { chatId: string };
+  'chat:deleted': { chatId: string };
+  'chat:message-appended': { chatId: string; messageId: string; role: ChatMessage['role'] };
+}
+
+/** Context-window handling strategy when a chat's history exceeds `maxContextTokens` — TZ §9.7. */
+export type ContextStrategy = 'fail' | 'truncate-oldest' | 'truncate-to-fit';
+
+/** `Unsubscribe` handles returned by `on()`/port event registrations. */
+export type Unsubscribe = () => void;
