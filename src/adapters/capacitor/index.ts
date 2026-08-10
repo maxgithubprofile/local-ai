@@ -5,11 +5,10 @@
  * `@capacitor/*`/`@capgo/*` packages aren't available there (use
  * `local-ai/adapters/node-testing` instead).
  *
- * `ClockPort`/`HashPort` deliberately have no dedicated adapter here — per
- * TZ §3.1's tree they only appear under node-testing (`FakeClock` /
- * `WebCrypto Hash`); both are trivial/platform-generic enough that the
- * client wiring (Phase 1) reuses the same implementation on every platform
- * rather than duplicating it behind a Capacitor-specific file.
+ * `ClockPort`/`HashPort` deliberately have no *Capacitor-specific* adapter
+ * — `SystemClockAdapter`/`WebCryptoHashAdapter` (re-exported below, real
+ * implementations under `../shared/`) run unmodified in a WebView, so TZ
+ * §3.1's tree doesn't need a dedicated `Capacitor*` file for either.
  */
 export { CapacitorPlatformSupportAdapter } from './capacitor-platform-support.adapter.js';
 export { CapgoDeviceInfoAdapter } from './capgo-device-info.adapter.js';
@@ -18,3 +17,5 @@ export { CapacitorFsAdapter } from './capacitor-fs.adapter.js';
 export { CapacitorSqliteAdapter } from './capacitor-sqlite.adapter.js';
 export { LlamaCppCapacitorAdapter } from './llama-cpp-capacitor.adapter.js';
 export { CapacitorAppLifecycleAdapter } from './capacitor-app-lifecycle.adapter.js';
+export { WebCryptoHashAdapter } from '../shared/web-crypto-hash.adapter.js';
+export { SystemClockAdapter } from '../shared/system-clock.adapter.js';

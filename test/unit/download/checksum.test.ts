@@ -4,7 +4,7 @@ import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { verifyChecksum } from '../../../src/core/download/checksum.js';
-import { WebCryptoHashAdapter } from '../../../src/adapters/node-testing/web-crypto-hash.adapter.js';
+import { WebCryptoHashAdapter } from '../../../src/adapters/shared/web-crypto-hash.adapter.js';
 import { NodeFsAdapter } from '../../../src/adapters/node-testing/node-fs.adapter.js';
 
 describe('WebCryptoHashAdapter', () => {

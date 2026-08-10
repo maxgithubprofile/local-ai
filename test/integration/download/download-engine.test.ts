@@ -6,7 +6,7 @@ import * as path from 'node:path';
 import { DownloadEngine } from '../../../src/core/download/download-engine.js';
 import { NodeRangeDownloadAdapter } from '../../../src/adapters/node-testing/node-range-download.adapter.js';
 import { NodeFsAdapter } from '../../../src/adapters/node-testing/node-fs.adapter.js';
-import { WebCryptoHashAdapter } from '../../../src/adapters/node-testing/web-crypto-hash.adapter.js';
+import { WebCryptoHashAdapter } from '../../../src/adapters/shared/web-crypto-hash.adapter.js';
 import { NodeSqliteAdapter } from '../../../src/adapters/node-testing/node-sqlite.adapter.js';
 import { FakeClockAdapter } from '../../../src/adapters/node-testing/fake-clock.adapter.js';
 import { Database } from '../../../src/core/db/database.js';

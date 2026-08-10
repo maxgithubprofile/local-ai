@@ -23,7 +23,21 @@ export interface LlmRuntimePort {
   /** Releases the embedding context only — leaves the LLM context (if loaded) untouched. TZ §5.6. */
   releaseEmbeddingModel(): Promise<void>;
 
-  complete(input: CompletionInput, signal?: AbortSignal): CompletionStream<CompletionResult>;
+  /**
+   * `options.skipNativeTemplating` is `RuntimeFacade`'s hook for TZ §4.1
+   * mechanism 2: when set, `input.messages` is already a single
+   * fully-formatted prompt (`RuntimeFacade` ran it through the chat-template
+   * preset registry itself) — the adapter must pass it to the underlying
+   * plugin's raw/low-level completion mode instead of re-applying its own
+   * native chat-template machinery, which would double-format it. Omitted
+   * (or `false`) is mechanism 1 — the default, and the only case most
+   * adapters/models ever hit.
+   */
+  complete(
+    input: CompletionInput,
+    signal?: AbortSignal,
+    options?: { skipNativeTemplating?: boolean },
+  ): CompletionStream<CompletionResult>;
   embed(text: string | string[]): Promise<Float32Array | Float32Array[]>;
 
   /**

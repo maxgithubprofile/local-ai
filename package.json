@@ -104,5 +104,8 @@
     "typedoc": "^0.26.0",
     "typescript": "^5.5.0",
     "vitest": "^2.0.0"
+  },
+  "dependencies": {
+    "@noble/hashes": "^2.3.0"
   }
 }

@@ -199,21 +199,58 @@ against a real `CapacitorSqliteAdapter` on-device before treating 3.5 as verifie
 
 Depends on: 0.1 (`llama-cpp-capacitor` API), 0.4 (device-info), 1.3/1.4 (support/eligibility).
 
-- [ ] **4.1 `LlmRuntimePort.countTokens()` decision** — resolve §16.19 (real tokenizer call vs.
-  chars/4 heuristic pre-Phase-4) before wiring the context policy that depends on it.
-- [ ] **4.2 `NodeLlamaCppAdapter`** — real implementation via `node-llama-cpp`, small (0.1-0.5B)
-  fixture GGUFs under `test/fixtures/` (TZ §13.4).
-- [ ] **4.3 `LlamaCppCapacitorAdapter`** — real implementation per the 0.1 ADR.
-- [ ] **4.4 Chat-template preset registry** — pure function mapping `ModelArtifact.chatTemplate`
-  (`qwen`/`llama3`/`gemma`/`mistral`/`raw`) to a formatted prompt, for the fallback path (TZ §4.1
-  mechanism 2). Unit test per preset against a captured reference formatting.
-- [ ] **4.5 `RuntimeFacade`** (`src/core/runtime/runtime-facade.ts`) — resolves mechanism 1 vs. 2,
-  enforces `RuntimeBusyError` (single concurrent generation, TZ §9.4).
-- [ ] **4.6 Wire `checkSupport`/`checkDeviceEligibility`/`ensureModelReady`/`ensureEmbeddingReady`/
-  `complete`/`embed`** on `LocalAiClient` for real, replacing their stub bodies.
+- [x] **4.1 `LlmRuntimePort.countTokens()` decision** — resolved via ADR 0001: real tokenizer call
+  (`model.tokenize()`/`context.tokenize()`), not a heuristic — see `docs/decisions.md` #19.
+  **Done 2026-08-10.**
+- [x] **4.2 `NodeLlamaCppAdapter`** — real implementation via `node-llama-cpp`. Uses `LlamaChat`
+  (`chatWrapper: 'auto'`, mechanism 1) for the default path and `LlamaCompletion` (no templating) for
+  mechanism 2 (`options.skipNativeTemplating`, a new addition to `LlmRuntimePort.complete()` — see
+  4.5's note). Exercised against `test/fixtures/stories260K.gguf` (~1.2MB, ggml-org's own CI test
+  model — real inference, not mocked; exempted from the `*.gguf` gitignore rule). **Done 2026-08-10,
+  fully verified**: 6 integration tests green — real load, real streaming completion, real
+  `AbortSignal` cancellation producing `'cancelled'` with partial content, mechanism 2's raw-prompt
+  path, real session save/load round-trip, and the pre-load `RuntimeInitError` guard.
+- [x] **4.3 `LlamaCppCapacitorAdapter`** — real implementation per the 0.1 ADR: two independent
+  `LlamaContext` instances (`initLlama()` per model), `context.release()` never `releaseAllLlama()`,
+  `stopCompletion()` wired to the `AbortSignal`. **Done 2026-08-10.** Untestable from this environment
+  (no device) — same residual-risk pattern as every other Capacitor adapter.
+- [x] **4.4 Chat-template preset registry** (`src/core/runtime/chat-template-presets.ts`) — pure
+  function mapping `qwen`(ChatML)/`llama3`/`gemma`(system folded into the first user turn)/
+  `mistral`(system folded into the first `[INST]` block)/`raw` to a formatted prompt string.
+  **Done 2026-08-10** — 7 unit tests against hand-written reference formatting per preset.
+- [x] **4.5 `RuntimeFacade`** (`src/core/runtime/runtime-facade.ts`) — resolves mechanism 1
+  (`'auto'`, `messages` passed straight through) vs. mechanism 2 (explicit preset, pre-formats via
+  4.4's registry into a single message + `skipNativeTemplating: true`), enforces `RuntimeBusyError`
+  (single concurrent generation, TZ §9.4) via the "`complete()` never throws, `RuntimeBusyError`
+  surfaces through `stream.result` rejecting" convention `CompletionStream`'s own doc comment
+  specifies. **Note:** `LlmRuntimePort.complete()`'s signature gained a third `options?:
+  { skipNativeTemplating? }` parameter to carry mechanism 2's intent down to the adapter — the public
+  `LocalAiClient.complete()`/`CompletionInput` type is untouched by this (CLAUDE.md's "never add a raw
+  prompt escape hatch" rule is about the public API, not this internal port extension). **Done
+  2026-08-10**, 6 unit tests (`FakeLlmRuntimeAdapter`, pulled forward from Phase 5's task 5.4 since
+  `RuntimeFacade` needed a controllable fake regardless).
+- [x] **4.6 Wire `checkSupport`/`checkDeviceEligibility`/`ensureModelReady`/`ensureEmbeddingReady`/
+  `complete`/`embed`** on `LocalAiClient` for real. **Done 2026-08-10.** Also wired alongside (cheap
+  once the services existed): `create()` (validates a full `LocalAiPorts`, throwing `ConfigInvalidError`
+  listing exactly which port is missing — core cannot default a missing port itself, hexagonal
+  boundary), `resetLocalVerdicts()`, `refreshManifest()` (emits `manifest:updated`/`manifest:invalid`),
+  `ensureReady()`, a real `on()`/internal event emitter, and the Mode-A `ConversationApi` CRUD methods
+  (thin pass-through to Phase 3's `ConversationStore`). `sendMessage()`/`switchModel()`/
+  `switchEmbedding()`/`vectors.*`/lifecycle methods remain stubs — Phase 5/6 scope, unchanged.
+  `WebCryptoHashAdapter`/a new `SystemClockAdapter` moved to `src/adapters/shared/` (re-exported from
+  both `adapters/capacitor` and `adapters/node-testing`) since both are genuinely platform-generic —
+  the old location under `node-testing/` only would have meant a real Capacitor app importing a
+  subpath explicitly documented as Node-only to get a working `HashPort`/`ClockPort`, which was never
+  actually correct.
 
 **Phase 4 exit criterion (TZ §15):** facade logic green in Node incl. per-preset chat-template unit
 tests; manual smoke test on a low-end and high-end emulator confirms reasonable eligibility verdicts.
+**Status: met for everything testable here** — 119 total tests green (74 unit + 19 integration + 26
+contract), including a full `LocalAiClient` happy-path integration test (manifest refresh → eligibility
+gate → download → model+embedding load → streaming completion → embed) and both eligibility-policy
+block/warn scenarios. The "manual smoke test on a real low/high-end emulator" half of this criterion
+is not achievable here (no device/emulator) — real device-level eligibility verdict sanity-checking
+stays an open item before a v1 release, same as ADR 0004's residual risk.
 
 ---
 

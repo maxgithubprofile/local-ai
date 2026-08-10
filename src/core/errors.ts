@@ -97,3 +97,18 @@ export class ContextWindowExceededError extends LocalAiError {
     super('context_window_exceeded', message, options);
   }
 }
+
+/**
+ * `LocalAiConfig` is missing something `LocalAiClient.create()` needs to
+ * proceed — most commonly an incomplete `ports` object. `core/**` cannot
+ * import concrete adapters (hexagonal boundary, CLAUDE.md), so it cannot
+ * fill in a missing port itself; the consumer must supply every
+ * `LocalAiPorts` key (typically by spreading a platform's
+ * `create*Ports()`-style helper — see `adapters/capacitor/index.ts` — with
+ * any test overrides on top).
+ */
+export class ConfigInvalidError extends LocalAiError {
+  constructor(message: string, options?: ErrorOptions) {
+    super('config_invalid', message, options);
+  }
+}

@@ -6,6 +6,12 @@ coverage/
 .env
 .env.*
 *.gguf
+# Exception: a deliberately tiny (~1.2MB) real GGUF fixture used by
+# test/integration/runtime/node-llama-cpp.adapter.test.ts for real (not
+# mocked) inference — ggml-org's own CI test model, TZ §13.4. Everything
+# else under test/fixtures/ stays covered by the blanket *.gguf ignore
+# above; don't add a larger one without reconsidering this.
+!test/fixtures/stories260K.gguf
 *.tsbuildinfo
 .vitest-cache/
 /docs/typedoc/
