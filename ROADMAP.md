@@ -152,23 +152,46 @@ Depends on: 0.2 (`sqlite-vec` viability).
   doesn't yet expose `loadExtension` — so the sqlite-vec path (3.5) isn't exercised through this
   adapter; only `CapacitorSqliteAdapter` (3.3, real device only) can attempt it. Brute-force (3.6) is
   what actually runs in this repo's own Node tests.
-- [ ] **3.3 `CapacitorSqliteAdapter`** — real implementation, `loadVectorExtension()` per the 0.2 ADR.
-- [ ] **3.4 `ConversationStore` MVP** (`src/core/conversations/conversation-store.ts`) —
-  `createChat`/`listChats`/`getChat`/`renameChat`/`deleteChat` (cascade)/`getMessages` per TZ §9.1-9.2
-  Mode A only; `ConversationSyncApi` methods deferred to Phase 5 per TZ §15.
-- [ ] **3.5 `VectorStore` — sqlite-vec path** (`src/core/db/vector-store.ts` gets its first real
-  implementing class) — if 0.2 was accepted.
-- [ ] **3.6 `VectorStore` — brute-force fallback** — cosine similarity in TS over a `BLOB` column;
-  emits `vector-store:fallback-active`. Ships regardless of 0.2's outcome (documented fallback, TZ
-  §8.3), not only if sqlite-vec fails.
-- [ ] **3.7 `VectorSpaceMismatchError` guard** — both implementations check `vector_space` on every
-  `upsert`/`search`; `reindex()` is the only way to switch spaces (TZ §8.2).
-- [ ] **3.8 Contract tests** (`test/contract/vector-store.contract.ts`,
-  `test/contract/conversation-store.contract.ts`) — CRUD, cascade delete, the mismatch-guard scenario,
-  parametrized over both `VectorStore` implementations.
+- [x] **3.3 `CapacitorSqliteAdapter`** — real implementation against `@capacitor-community/sqlite`'s
+  shipped API (`SQLiteConnection`/`SQLiteDBConnection`); `loadVectorExtension()` calls
+  `enableLoadExtension(true)` + `loadExtension(path)`, resolves `false` instead of throwing. **Done
+  2026-08-10.** Untestable from this environment (no device) — see ADR 0002.
+- [x] **3.4 `ConversationStore` MVP** (`src/core/conversations/conversation-store.ts`) —
+  `createChat`/`listChats`/`getChat`/`renameChat`/`deleteChat` (cascade, explicit transaction rather
+  than relying on `ON DELETE CASCADE` — SQLite's `foreign_keys` pragma defaults off per-connection,
+  not guaranteed on)/`getMessages` per TZ §9.1-9.2, Mode A only. **Done 2026-08-10.**
+  `ConversationSyncApi` methods deferred to Phase 5 per TZ §15, as planned.
+- [x] **3.5 `VectorStore` — sqlite-vec path** (`src/core/db/sqlite-vec-vector-store.ts`) — `vec0`
+  virtual table (`distance_metric=cosine`) + a `vector_meta` companion table for the string
+  `id`/`text`/`metadata` a `vec0` table can't hold natively. **Done 2026-08-10, unverified** — cannot
+  be exercised from this environment (`NodeSqliteAdapter.loadVectorExtension()` is a hard `false`, no
+  device available) — implemented against best-available knowledge of `sqlite-vec`'s SQL syntax, not
+  empirically confirmed. `create-vector-store.ts`'s self-test (throwaway table, never touches real
+  data) is what decides at runtime whether this class is ever actually selected.
+- [x] **3.6 `VectorStore` — brute-force fallback** (`src/core/db/brute-force-vector-store.ts`) —
+  cosine similarity in TS over `vector_entries`' `BLOB` column. Ships unconditionally; is the only
+  path this repo's own tests can exercise end-to-end (see 3.5's note). `vector-store:fallback-active`
+  emission is `LocalAiClient`'s job (Phase 4/5 wiring) once it reads `createVectorStore()`'s
+  `usedFallback` flag — not implemented here, that flag is the hook. **Done 2026-08-10.**
+- [x] **3.7 `VectorSpaceMismatchError` guard** — implemented once in `BaseVectorStore`
+  (`src/core/db/vector-store-base.ts`), shared by both implementations rather than duplicated:
+  `ensureSchema()` blocks a space change while data exists; `upsert`/`upsertMany`/`search` all assert
+  the given space matches `vector_space` exactly (id + version + dimensions) and also that the
+  embedding's own dimension count matches; `reindex()` is the only way to switch. **Done 2026-08-10.**
+- [x] **3.8 Contract tests** (`test/contract/vector-store.contract.ts`,
+  `test/contract/conversation-store.contract.ts`) — CRUD, cascade delete, the mismatch-guard scenario
+  (mismatched space on `upsert`/`search`, and `ensureSchema()` with existing data), `reindex()`
+  unblocking further writes. **Done 2026-08-10.** Parametrized over `BruteForceVectorStore` (the only
+  `VectorStore` implementation this environment can exercise, see 3.5) and `NodeSqliteAdapter` for
+  `ConversationStore`.
 
 **Phase 3 exit criterion (TZ §15):** chat CRUD + cascade delete tests green; `VectorStore.search()`
-green on both paths + the guard test on space mismatch.
+green on both paths + the guard test on space mismatch. **Status: met for the paths testable here** —
+92 total tests green (61 unit + 5 integration + 26 contract) across the whole suite as of this phase;
+`VectorStore.search()` and the guard tests are green on `BruteForceVectorStore` (the guaranteed v1
+path) — the sqlite-vec path's tests are written and wired but cannot execute without a device, exactly
+mirroring ADR 0002's already-`proposed`, not-`accepted` status. Re-run `test/contract/vector-store.contract.ts`
+against a real `CapacitorSqliteAdapter` on-device before treating 3.5 as verified.
 
 ---
 
