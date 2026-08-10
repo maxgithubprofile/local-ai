@@ -23,26 +23,42 @@ Each row below is run via the `spike` skill and produces an ADR under `docs/adr/
 work that depends on a spike's outcome should start until that spike's ADR exists (`accepted`, not
 just `proposed`).
 
-- [ ] **0.1 `llama-cpp-capacitor` API spike** — confirm real method signatures for `initLlama`,
+- [x] **0.1 `llama-cpp-capacitor` API spike** — confirm real method signatures for `initLlama`,
   `completion` (stream), `embedding`, `release`/`releaseAllLlama`, `stopCompletion`,
   `saveSession`/`loadSession`, `loadLlamaModelInfo` against the installed package version, not the
-  README (TZ §4.1). Blocks: Phase 4.
-- [ ] **0.2 `sqlite-vec` via `loadExtension()` spike** — Android and iOS, TZ §4.2/§8.3. Determines
+  README (TZ §4.1). Blocks: Phase 4. — **Done 2026-08-10**: [ADR 0001](docs/adr/0001-llama-cpp-capacitor-api.md),
+  `accepted`. Real API is instance-based (`initLlama()` → `LlamaContext`), not the free-function shape
+  the stub assumed — see ADR for the concrete adapter design Phase 4 should follow.
+- [x] **0.2 `sqlite-vec` via `loadExtension()` spike** — Android and iOS, TZ §4.2/§8.3. Determines
   whether Phase 3's `VectorStore` primary path is viable or the brute-force fallback ships first.
-  Blocks: Phase 3.
-- [ ] **0.3 `@capgo/capacitor-downloader` spike** — resume after app backgrounding *and* after
+  Blocks: Phase 3. — **Done 2026-08-10**: [ADR 0002](docs/adr/0002-sqlite-vec-load-extension.md),
+  `proposed` (desk research only, no device available). Both `VectorStore` paths ship regardless per
+  original plan; brute-force is the one this repo's own Node tests can fully verify.
+- [x] **0.3 `@capgo/capacitor-downloader` spike** — resume after app backgrounding *and* after
   process kill, `wifi-only` option, exact `destination` path format (TZ §4.4, §7.2). ⚠ resolves
-  §16.13. Blocks: Phase 2.
-- [ ] **0.4 `@capgo/capacitor-device-info` spike** — real `getSnapshot()` fields, RAM/thermal
+  §16.13. Blocks: Phase 2. — **Done 2026-08-10**: [ADR 0003](docs/adr/0003-capgo-capacitor-downloader.md),
+  `proposed` (real API confirmed from source; process-kill survival unverified — `DownloadEngine`
+  designed to always re-verify via checksum rather than trust resume blindly).
+- [x] **0.4 `@capgo/capacitor-device-info` spike** — real `getSnapshot()` fields, RAM/thermal
   accuracy on one real Android + one real iOS device (TZ §4.5, §6.2). Blocks: Phase 4 (eligibility
-  wiring), informs §16.15.
-- [ ] **0.5 `Capacitor.isPluginAvailable()` plugin-name constants** — collect the exact registration
+  wiring), informs §16.15. — **Done 2026-08-10**: [ADR 0004](docs/adr/0004-capgo-device-info.md),
+  `proposed` (field shape confirmed from source; real-device accuracy of the numbers unverified).
+- [x] **0.5 `Capacitor.isPluginAvailable()` plugin-name constants** — collect the exact registration
   string for every native plugin in use (TZ §6.1). Blocks: `SupportChecker` implementation (Phase 1).
-- [ ] **0.6 Streaming SHA-256 timing spike** — measure hashing a ~2.5GB file on a mid-range Android
+  — **Done 2026-08-10**: [ADR 0005](docs/adr/0005-native-plugin-name-constants.md), `accepted`.
+- [x] **0.6 Streaming SHA-256 timing spike** — measure hashing a ~2.5GB file on a mid-range Android
   device (TZ §7.4, §17). Informs whether background hashing UX (progress) is required in Phase 2.
+  — **Done 2026-08-10**: [ADR 0006](docs/adr/0006-streaming-sha256-timing.md), `proposed`
+  (desktop-CPU proxy only, no Android device available — incremental checksum progress UI built
+  regardless since it's correct either way).
 
 **Phase 0 exit criterion:** an ADR per row above, `accepted` or explicitly `rejected` with a
-documented fallback (e.g. 0.2 rejected → brute-force fallback adopted as primary for v1).
+documented fallback (e.g. 0.2 rejected → brute-force fallback adopted as primary for v1). **Status:**
+all 6 ADRs written; 0001/0005 `accepted` (fully desk-verifiable), 0002/0003/0004/0006 `proposed`
+pending real-device confirmation (no Android/iOS device or emulator available in this environment) —
+every downstream Phase 1-6 task below is designed to not depend on that confirmation (fallbacks are
+unconditional, not conditional on a device pass). Re-run those four against real hardware before a v1
+release and flip them to `accepted`/`rejected`.
 
 ---
 

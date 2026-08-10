@@ -6,7 +6,7 @@
   "license": "UNLICENSED",
   "type": "module",
   "engines": {
-    "node": ">=18.18"
+    "node": ">=22.5.0"
   },
   "exports": {
     ".": {
@@ -45,25 +45,60 @@
     "docs": "typedoc"
   },
   "peerDependencies": {
-    "@capacitor/core": ">=8.0.0"
+    "@capacitor-community/sqlite": ">=8.0.0",
+    "@capacitor/app": ">=8.0.0",
+    "@capacitor/core": ">=8.0.0",
+    "@capacitor/filesystem": ">=8.0.0",
+    "@capgo/capacitor-device-info": ">=8.0.0",
+    "@capgo/capacitor-downloader": ">=8.0.0",
+    "llama-cpp-capacitor": ">=0.1.5"
   },
   "peerDependenciesMeta": {
+    "@capacitor-community/sqlite": {
+      "optional": true
+    },
+    "@capacitor/app": {
+      "optional": true
+    },
     "@capacitor/core": {
+      "optional": true
+    },
+    "@capacitor/filesystem": {
+      "optional": true
+    },
+    "@capgo/capacitor-device-info": {
+      "optional": true
+    },
+    "@capgo/capacitor-downloader": {
+      "optional": true
+    },
+    "llama-cpp-capacitor": {
       "optional": true
     }
   },
   "pnpm": {
     "onlyBuiltDependencies": [
-      "esbuild"
+      "esbuild",
+      "better-sqlite3",
+      "node-llama-cpp"
     ]
   },
   "devDependencies": {
+    "@capacitor-community/sqlite": "^8.1.1",
+    "@capacitor/app": "^8.1.1",
+    "@capacitor/filesystem": "^8.1.2",
+    "@capgo/capacitor-device-info": "^8.0.10",
+    "@capgo/capacitor-downloader": "^8.1.31",
     "@eslint/js": "^9.9.0",
     "@types/node": "^22.0.0",
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",
+    "better-sqlite3": "^13.0.3",
     "eslint": "^9.9.0",
     "eslint-plugin-jsdoc": "^48.11.0",
+    "llama-cpp-capacitor": "^0.1.5",
+    "node-llama-cpp": "^3.19.1",
+    "sqlite-vec": "^0.1.9",
     "tsup": "^8.2.0",
     "typedoc": "^0.26.0",
     "typescript": "^5.5.0",

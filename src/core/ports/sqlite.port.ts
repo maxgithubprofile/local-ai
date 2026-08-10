@@ -5,8 +5,9 @@ export type SqliteRow = Record<string, unknown>;
  * Minimal SQL port both `Database`/`ConversationStore`/`VectorStore` and
  * the migration runner (TZ §8.1) depend on. Implemented by
  * `CapacitorSqliteAdapter` (`@capacitor-community/sqlite`, TZ §4.2) in
- * production and `BetterSqliteAdapter` (`better-sqlite3` + `sqlite-vec`)
- * in tests (TZ §13.1). `loadExtension` is intentionally out of this base
+ * production and `NodeSqliteAdapter` (`node:sqlite`'s `DatabaseSync`, see
+ * `docs/decisions.md`'s tooling-notes section) in tests (TZ §13.1).
+ * `loadExtension` is intentionally out of this base
  * port — it's `sqlite-vec`-specific and risky on iOS (TZ §8.3), so it's
  * exposed as an optional capability rather than a required method every
  * adapter must implement.
