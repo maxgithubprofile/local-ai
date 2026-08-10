@@ -38,10 +38,10 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "test": "npm run lint && npm run typecheck && npm run test:unit && npm run test:integration",
-    "test:unit": "vitest run --dir test/unit --passWithNoTests",
-    "test:integration": "vitest run --dir test/integration --passWithNoTests",
-    "test:contract": "vitest run --dir test/contract --passWithNoTests",
-    "test:watch": "vitest",
+    "test:unit": "cross-env NODE_OPTIONS=--experimental-sqlite vitest run --dir test/unit --passWithNoTests",
+    "test:integration": "cross-env NODE_OPTIONS=--experimental-sqlite vitest run --dir test/integration --passWithNoTests",
+    "test:contract": "cross-env NODE_OPTIONS=--experimental-sqlite vitest run --dir test/contract --passWithNoTests",
+    "test:watch": "cross-env NODE_OPTIONS=--experimental-sqlite vitest",
     "docs": "typedoc"
   },
   "peerDependencies": {
@@ -94,6 +94,7 @@
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",
     "better-sqlite3": "^13.0.3",
+    "cross-env": "^10.1.0",
     "eslint": "^9.9.0",
     "eslint-plugin-jsdoc": "^48.11.0",
     "llama-cpp-capacitor": "^0.1.5",

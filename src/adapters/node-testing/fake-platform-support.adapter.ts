@@ -1,22 +1,30 @@
 import type { PlatformSupportPort } from '../../core/ports/platform-support.port.js';
 
 /**
- * Not implemented — Phase 1 (ROADMAP.md). In-memory fake used to drive
- * `SupportChecker` unit tests across scenarios (web without a plugin,
- * native without a plugin, native with everything) without any real
- * platform — TZ §13.1. Constructor should accept a fixed
- * `{ platform, isNative, availablePlugins }` fixture once implemented.
+ * In-memory fake used to drive `SupportChecker` unit tests across scenarios
+ * (web without a plugin, native without a plugin, native with everything)
+ * without any real platform — TZ §13.1. Constructed with a fixed fixture;
+ * nothing here is I/O or async under the hood, it just reports back what it
+ * was given.
  */
 export class FakePlatformSupportAdapter implements PlatformSupportPort {
+  constructor(
+    private readonly fixture: {
+      platform: 'ios' | 'android' | 'web' | string;
+      isNative: boolean;
+      availablePlugins: string[];
+    },
+  ) {}
+
   isNativePlatform(): boolean {
-    throw new Error('not implemented — see TZ §6.1, §13.1, ROADMAP Phase 1');
+    return this.fixture.isNative;
   }
 
   getPlatform(): 'ios' | 'android' | 'web' | string {
-    throw new Error('not implemented — see TZ §6.1, §13.1, ROADMAP Phase 1');
+    return this.fixture.platform;
   }
 
-  isPluginAvailable(_pluginName: string): boolean {
-    throw new Error('not implemented — see TZ §6.1, §13.1, ROADMAP Phase 1');
+  isPluginAvailable(pluginName: string): boolean {
+    return this.fixture.availablePlugins.includes(pluginName);
   }
 }

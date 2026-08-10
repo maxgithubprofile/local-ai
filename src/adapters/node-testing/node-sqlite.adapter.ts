@@ -1,38 +1,68 @@
+import type { DatabaseSync as DatabaseSyncType } from 'node:sqlite';
 import type { SqlitePort, SqliteRow } from '../../core/ports/sqlite.port.js';
 
+// `process.getBuiltinModule()` (Node ≥20.16) rather than a static
+// `import { DatabaseSync } from 'node:sqlite'` — Vite/Vitest's SSR module
+// graph (used by `vitest run`) doesn't resolve `node:sqlite` on the Vite
+// version this repo pins, treating it as a bare `sqlite` package import
+// instead of a builtin. Fetching it as a builtin at call time sidesteps
+// that resolution step entirely and needs no bundler config either way.
+const { DatabaseSync } = process.getBuiltinModule('node:sqlite') as { DatabaseSync: typeof DatabaseSyncType };
+
 /**
- * Not implemented — Phase 3 (ROADMAP.md). `node:sqlite`'s `DatabaseSync` as
- * the Node-testing reference implementation (TZ §13.1). Originally scoped as
- * `better-sqlite3` + `sqlite-vec`; switched to Node's built-in `node:sqlite`
- * after `better-sqlite3`'s prebuilt native binary was found to crash in the
- * dev environment this project was built in — see
- * `docs/decisions.md`'s "Implementation/tooling notes" section and ADR
- * `docs/adr/0002-sqlite-vec-load-extension.md`. Consequence:
- * `loadVectorExtension()` here is a documented no-op (`node:sqlite` doesn't
- * yet expose `loadExtension`/`enableLoadExtension` as of the Node version
- * pinned in `engines`) — the brute-force `VectorStore` fallback is what gets
- * exercised against this adapter; the sqlite-vec path stays validated on the
- * production `CapacitorSqliteAdapter` path only (real device, Phase 0 ADR
- * 0002 not yet `accepted`).
+ * `node:sqlite`'s `DatabaseSync` as the Node-testing `SqlitePort`
+ * implementation (TZ §13.1). Originally scoped as `better-sqlite3` +
+ * `sqlite-vec`; switched to Node's built-in `node:sqlite` after
+ * `better-sqlite3`'s prebuilt native binary was found to crash in the dev
+ * environment this project was built in — see `docs/decisions.md`'s
+ * "Implementation/tooling notes" section and
+ * `docs/adr/0002-sqlite-vec-load-extension.md`. Requires Node started with
+ * `--experimental-sqlite` (this repo's `test:*` scripts set it via
+ * `NODE_OPTIONS`, see `package.json`) until the flag is dropped upstream.
+ *
+ * `execute()` without `params` runs `sql` through `DatabaseSync.exec()`,
+ * which (unlike a prepared statement) supports multiple `;`-separated
+ * statements in one string — needed for the migration runner, which hands
+ * a whole migration file's contents to a single `execute()` call.
  */
 export class NodeSqliteAdapter implements SqlitePort {
-  async execute(_sql: string, _params?: unknown[]): Promise<void> {
-    throw new Error('not implemented — see TZ §8, §13.1, ROADMAP Phase 3');
+  private readonly db: DatabaseSyncType;
+
+  constructor(path: string = ':memory:') {
+    this.db = new DatabaseSync(path);
   }
 
-  async query<T extends SqliteRow = SqliteRow>(_sql: string, _params?: unknown[]): Promise<T[]> {
-    throw new Error('not implemented — see TZ §8, §13.1, ROADMAP Phase 3');
+  async execute(sql: string, params?: unknown[]): Promise<void> {
+    if (params && params.length > 0) {
+      this.db.prepare(sql).run(...(params as never[]));
+    } else {
+      this.db.exec(sql);
+    }
   }
 
-  async transaction<T>(_fn: (tx: SqlitePort) => Promise<T>): Promise<T> {
-    throw new Error('not implemented — see TZ §8, §13.1, ROADMAP Phase 3');
+  async query<T extends SqliteRow = SqliteRow>(sql: string, params?: unknown[]): Promise<T[]> {
+    const stmt = this.db.prepare(sql);
+    const rows = params && params.length > 0 ? stmt.all(...(params as never[])) : stmt.all();
+    return rows as T[];
+  }
+
+  async transaction<T>(fn: (tx: SqlitePort) => Promise<T>): Promise<T> {
+    this.db.exec('BEGIN');
+    try {
+      const result = await fn(this);
+      this.db.exec('COMMIT');
+      return result;
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
   }
 
   async close(): Promise<void> {
-    throw new Error('not implemented — see TZ §8, §13.1, ROADMAP Phase 3');
+    this.db.close();
   }
 
-  /** Always resolves `false` on this adapter — see class doc. */
+  /** Always resolves `false` on this adapter — `node:sqlite` doesn't yet expose `loadExtension`. See class doc. */
   async loadVectorExtension(): Promise<boolean> {
     return false;
   }

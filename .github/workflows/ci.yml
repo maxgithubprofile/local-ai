@@ -1,0 +1,45 @@
+name: CI
+
+# Runs on every PR + push to main — lint, typecheck, unit, integration (TZ
+# §13.5). `test:device-e2e` is deliberately never invoked here: it needs a
+# real device/emulator (ROADMAP.md Phase 1, task 1.6; `docs/decisions.md`
+# #12 — device-e2e CI infra is still an open question, out of scope for
+# this workflow either way).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [22.x]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Unit tests
+        run: pnpm run test:unit
+
+      - name: Integration tests
+        run: pnpm run test:integration
+
+      - name: Contract tests
+        run: pnpm run test:contract

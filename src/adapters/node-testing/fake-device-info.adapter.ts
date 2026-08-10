@@ -2,12 +2,20 @@ import type { DeviceInfoPort } from '../../core/ports/device-info.port.js';
 import type { DeviceSnapshot } from '../../core/support/types.js';
 
 /**
- * Not implemented — Phase 1 (ROADMAP.md). Returns a fixed/injectable
- * {@link DeviceSnapshot} (or `null`, to exercise the soft-dependency path)
- * for `evaluateEligibility()`'s boundary tests — TZ §13.1.
+ * Returns a fixed/injectable {@link DeviceSnapshot} (or `null`, to exercise
+ * the soft-dependency path) for `EligibilityService`'s tests — TZ §13.1.
+ * Mutable via {@link FakeDeviceInfoAdapter.set} so a single instance can
+ * simulate a device's RAM/thermal state changing between calls.
  */
 export class FakeDeviceInfoAdapter implements DeviceInfoPort {
+  constructor(private snapshot: DeviceSnapshot | null = null) {}
+
   async getSnapshot(): Promise<DeviceSnapshot | null> {
-    throw new Error('not implemented — see TZ §6.2, §13.1, ROADMAP Phase 1');
+    return this.snapshot;
+  }
+
+  /** Replaces the snapshot returned by subsequent {@link getSnapshot} calls. */
+  set(snapshot: DeviceSnapshot | null): void {
+    this.snapshot = snapshot;
   }
 }

@@ -1,7 +1,21 @@
--- Initial schema — transcribed verbatim from TZ §8.1.
--- Applied by the (Phase 3) migration runner inside a single transaction;
--- tracked as row `(1, '001_init', <applied_at>)` in `_local_ai_migrations`.
-
+/**
+ * Initial schema — transcribed verbatim from TZ §8.1. Applied by the
+ * migration runner (`../database.ts`) inside a single transaction; tracked
+ * as row `(1, '001_init', <applied_at>)` in `_local_ai_migrations`.
+ *
+ * Migrations are `.ts` files exporting a `sql` string constant rather than
+ * bare `.sql` files — this package builds with `tsup`/esbuild and ships to
+ * consumers who bundle it with their own tooling (Metro/Vite/webpack for a
+ * Capacitor app); a runtime `FileSystemPort.readFile()` of the package's
+ * own internal `.sql` files would be fragile across those bundlers/mobile
+ * targets, and configuring a `.sql`-as-text loader identically across
+ * `tsup` (esbuild) *and* `vitest` (Vite) added tooling surface for no real
+ * benefit over just writing the SQL as a template string. See
+ * `docs/decisions.md`'s "Implementation/tooling notes" section. `add-migration`'s
+ * conventions (numbered, additive-only, snake_case, TZ section comment)
+ * otherwise apply unchanged — only the file extension differs.
+ */
+export const sql = `
 CREATE TABLE IF NOT EXISTS _local_ai_migrations (
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL,
@@ -73,3 +87,4 @@ CREATE TABLE IF NOT EXISTS vector_space (
   dimensions INTEGER NOT NULL,
   updated_at TEXT NOT NULL
 );
+`;

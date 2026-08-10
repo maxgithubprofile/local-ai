@@ -68,24 +68,32 @@ Bootstrap already delivered: package scaffold, all 9 ports, manifest/support/dow
 types, error hierarchy, event map, `LocalAiClient` method-signature shell, SQL migration `001_init.sql`,
 and a fully-implemented + unit-tested `evaluateEligibility()`. Remaining:
 
-- [ ] **1.1 `ManifestService`** (`src/core/manifest/manifest.service.ts`) — fetch with
-  `If-None-Match`, schema validation (TZ §5.2's full rule list), ETag cache in `kv_store`, emits
-  `manifest:invalid` on failure instead of throwing past `LocalAiClient`. Depends on: `SqlitePort`
-  usable (can use `BetterSqliteAdapter` stub target, or a minimal in-memory fake first).
-- [ ] **1.2 `diffManifest()`** (`src/core/manifest/manifest.diff.ts`) — implement the body per TZ
-  §5.4's flow; unit-test both `modelChanged`/`embeddingChanged` independently.
-- [ ] **1.3 `SupportChecker`** (`src/core/support/support-checker.ts`) — implement per TZ §6.1's
-  degradation rule table. ⚠ blocked by 0.5 for the real plugin-name constants (use a placeholder
-  constants file otherwise, clearly marked TODO).
-- [ ] **1.4 `EligibilityService` class** (`src/core/support/eligibility-service.ts`) — wraps
-  `evaluateEligibility()` (already implemented) with a live `DeviceInfoPort` snapshot + `kv_store`
-  persisted `LocalRuntimeVerdict`s (TZ §6.3), plus `resetLocalVerdicts()`.
-- [ ] **1.5 `FakePlatformSupportAdapter` + `FakeDeviceInfoAdapter` + `FakeClockAdapter`** — real
-  implementations (constructor-injectable fixtures) backing 1.3/1.4's tests.
-- [ ] **1.6 CI workflow** — GitHub Actions (or equivalent) running `pnpm test` (lint+typecheck+unit+
-  integration) on every PR, per TZ §13.5. `test:device-e2e` not included.
+- [x] **1.1 `ManifestService`** (`src/core/manifest/manifest.service.ts`) — fetch with
+  `If-None-Match`, schema validation (TZ §5.2's full rule list), ETag cache in `kv_store`, throws
+  typed errors (`ManifestFetchError`/`ManifestValidationError`) rather than emitting the event itself
+  — translating that into `manifest:invalid` is `LocalAiClient`'s job (Phase 4, task 4.6), noted in
+  the class's own doc comment. **Done 2026-08-10.** Depends-on note: `SqlitePort` needed to be usable
+  for `kv_store`, so `Database`'s migration runner (3.1) and `NodeSqliteAdapter` (half of 3.2) were
+  pulled forward into this task rather than faked — see Phase 3's note below.
+- [x] **1.2 `diffManifest()`** (`src/core/manifest/manifest.diff.ts`) — implemented as a pure function
+  comparing `next` against an `installed` snapshot (until `ModelRegistry`'s read side exists in
+  Phase 2/5, `ManifestService` passes the previously-cached manifest as that snapshot — see the
+  function's doc comment); `modelChanged`/`embeddingChanged` unit-tested independently. **Done
+  2026-08-10.**
+- [x] **1.3 `SupportChecker`** (`src/core/support/support-checker.ts`) — implemented per TZ §6.1's
+  degradation rule table using the real plugin-name constants from ADR 0005 (no placeholder needed,
+  0.5 already `accepted`). **Done 2026-08-10.**
+- [x] **1.4 `EligibilityService` class** (`src/core/support/eligibility-service.ts`) — wraps
+  `evaluateEligibility()` with a live `DeviceInfoPort` snapshot + `kv_store`-persisted
+  `LocalRuntimeVerdict`s (TZ §6.3), `recordVerdict()`/`resetLocalVerdicts()`. **Done 2026-08-10.**
+- [x] **1.5 `FakePlatformSupportAdapter` + `FakeDeviceInfoAdapter` + `FakeClockAdapter`** — real
+  constructor-injectable-fixture implementations backing 1.3/1.4's tests. **Done 2026-08-10.**
+- [x] **1.6 CI workflow** — `.github/workflows/ci.yml`, `ubuntu-latest`/Node 22.x, running
+  lint/typecheck/unit/integration/contract on every PR + push to `main`, per TZ §13.5.
+  `test:device-e2e` not included. **Done 2026-08-10.**
 
 **Phase 1 exit criterion (TZ §15):** `npm test` green on manifest, support, and eligibility logic.
+**Status: met** — 46 unit tests green across manifest/support/eligibility/db, plus lint+typecheck.
 
 ---
 
@@ -118,10 +126,17 @@ if a device is available, `CapgoDownloaderAdapter`).
 
 Depends on: 0.2 (`sqlite-vec` viability).
 
-- [ ] **3.1 `Database` migration runner** (`src/core/db/database.ts`) — applies numbered files under
-  `src/core/db/migrations/` in transactions, tracks `_local_ai_migrations`.
-- [ ] **3.2 `BetterSqliteAdapter`** — real implementation incl. `loadVectorExtension()` attempting
-  `sqlite-vec`.
+- [x] **3.1 `Database` migration runner** (`src/core/db/database.ts`) — applies numbered files under
+  `src/core/db/migrations/` in transactions, tracks `_local_ai_migrations`. **Done 2026-08-10 (pulled
+  forward into Phase 1)** — task 1.1 (`ManifestService`) needed a real `SqlitePort` to persist
+  `kv_store`, so this got built then instead of faked twice. Migrations are `.ts` files exporting a
+  `sql` string constant, not bare `.sql` — see `docs/decisions.md`'s tooling-notes section.
+- [x] **3.2 `NodeSqliteAdapter`** (renamed from `BetterSqliteAdapter`, see `docs/decisions.md`) — real
+  implementation over `node:sqlite`'s `DatabaseSync`. **Done 2026-08-10 (pulled forward, same reason
+  as 3.1).** `loadVectorExtension()` is a documented no-op (`false`) on this adapter — `node:sqlite`
+  doesn't yet expose `loadExtension` — so the sqlite-vec path (3.5) isn't exercised through this
+  adapter; only `CapacitorSqliteAdapter` (3.3, real device only) can attempt it. Brute-force (3.6) is
+  what actually runs in this repo's own Node tests.
 - [ ] **3.3 `CapacitorSqliteAdapter`** — real implementation, `loadVectorExtension()` per the 0.2 ADR.
 - [ ] **3.4 `ConversationStore` MVP** (`src/core/conversations/conversation-store.ts`) —
   `createChat`/`listChats`/`getChat`/`renameChat`/`deleteChat` (cascade)/`getMessages` per TZ §9.1-9.2

@@ -16,11 +16,35 @@ export interface ManifestDiff {
 }
 
 /**
- * Not implemented — Phase 1 (ROADMAP.md). Compares `installed.modelVersion`
- * / `installed.embeddingVersion` against a freshly validated manifest per
- * TZ §5.4's flow (handles the 304-not-modified short-circuit upstream, in
- * `ManifestService`).
+ * Compares `next` against `installed` (TZ §5.4's "сравнить
+ * installed.modelVersion / installed.embeddingVersion"). `installed` is
+ * whatever the caller currently considers the source of truth for "what's
+ * on this device": `ModelRegistry`'s `installed_artifacts` rows once that's
+ * wired (Phase 2/5), or — until then — `ManifestService` passing the
+ * previously cached manifest's artifacts as a best-effort stand-in (nothing
+ * is actually installed yet in that case, so `undefined` fields there
+ * still correctly report `modelChanged`/`embeddingChanged: true`).
+ *
+ * Changed = different `id` **or** different `version` — a same-`id`
+ * version bump and a full model swap are both "changed", exactly alike;
+ * callers that care about the distinction can compare `from.id`/`to.id`
+ * themselves.
  */
-export function diffManifest(): ManifestDiff {
-  throw new Error('not implemented — see TZ §5.4, ROADMAP Phase 1');
+export function diffManifest(
+  next: { model: ModelArtifact; embedding: EmbeddingArtifact },
+  installed: { model?: ModelArtifact; embedding?: EmbeddingArtifact },
+): ManifestDiff {
+  const modelChanged =
+    !installed.model || installed.model.id !== next.model.id || installed.model.version !== next.model.version;
+  const embeddingChanged =
+    !installed.embedding ||
+    installed.embedding.id !== next.embedding.id ||
+    installed.embedding.version !== next.embedding.version;
+
+  return {
+    modelChanged,
+    embeddingChanged,
+    model: { from: installed.model, to: next.model },
+    embedding: { from: installed.embedding, to: next.embedding },
+  };
 }
