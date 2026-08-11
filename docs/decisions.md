@@ -50,6 +50,92 @@ User scoped the 2026-08-11 Phase 8 request to: multi-slot LRU session-cache (#8 
 
 **Decision:** deliberately **no separate import method**. `exportChat()`/`exportChats()` return `{ chat, messages }` shaped exactly as `upsertChat()`'s input + `appendMessages()`'s input — round-tripping a backup is `upsertChat(exported.chat)` + `appendMessages(exported.chatId, exported.messages)`, both already idempotent. Building a bespoke import path would duplicate logic `ConversationSyncApi` already provides for the identical shape. No file/DB-level raw backup (e.g. copying the SQLite file) — TZ never specifies one, JSON-shaped export is the smallest reasonable interpretation of "export/backup" that composes with what already exists, and it's the same reasoning as this row's "least specified" flag when the user was asked to scope Phase 8.
 
+## Security audit (2026-08-11)
+
+Found during a manual security audit against TZ §14's invariants, requested by the user. The
+`security-review` skill's `git diff origin/HEAD...` pre-hook errored out before loading (no `origin`
+remote configured in this repo — `git remote -v` is empty), so this was done by hand instead: read
+through `manifest.service.ts`'s validation rules, `DownloadEngine`/`FileSystemPort`, the SQL layer, the
+hexagonal boundary, and dependency surface, cross-referencing each against TZ §14's four hard
+invariants and general vulnerability classes for this kind of library (download/checksum pipeline,
+SQLite, gated ports). Three concrete gaps found; scoped as `ROADMAP.md`'s new "Security hardening"
+section (SEC.1-SEC.3), none implemented yet as of this entry. (Two more low-severity findings from the
+same pass — an unvalidated `embedding.dimensions` reaching a SQL DDL string, and `HuggingFaceSource`'s
+`repo`/`file` fields going unchecked — were flagged to the user but not yet scoped into ROADMAP.md;
+revisit if/when requested.)
+
+### Path traversal via `manifest.filename` (SEC.1)
+
+**Finding:** `validateManifest()` checks `sha256`/`sizeBytes`/`revision`/etc. but never touches
+`model.filename`/`embedding.filename`. `DownloadEngine.downloadArtifact()` and `LocalAiClient`'s
+old-file cleanup on a model/embedding switch both pass that field straight into
+`FileSystemPort.resolvePath('models'|'embeddings', filename)`. Both `resolvePath()` implementations
+(`node-fs.adapter.ts`'s `path.join`, `capacitor-fs.adapter.ts`'s `'/'.join`) are explicitly documented
+as trusting the caller instead of sandboxing against `../` — an assumption that's false here, since
+`filename` originates from the network (the manifest), not from the library's own code.
+
+**Decision:** add a strict filename-shape check to `validateManifest()` — reject any `filename` that
+isn't a bare, `.gguf`-suffixed basename (no path separators, no `..`) — as a new
+`ManifestValidationError` reason, the same mechanism the `revision`/`sha256` checks already use.
+Chosen over hardening `resolvePath()` itself: defense-in-depth there is still worth doing later, but
+the manifest-side fix closes the actual gap at its root (an untrusted field being trusted), rather than
+only working around a documented, otherwise-reasonable adapter assumption.
+
+**Why:** the manifest is fetched over the network; treating any of its fields as safe to hand to the
+filesystem layer unchecked contradicts `resolvePath()`'s own stated trust model ("paths come from
+`local-ai`'s own code, never directly from untrusted input").
+
+**How to apply:** implement in `manifest.service.ts`'s `validateManifest()`, mirroring the existing
+`HEX64`-regex pattern already used for `sha256`.
+
+### `manifestUrl` not required to be `https://` (SEC.2)
+
+**Finding:** TZ §14 requires HTTPS for every network call the library makes. The resolved model URL
+(hardcoded to `huggingface.co`, `artifact-url.ts`) and `embedding.source.url` (checked inside
+`validateManifest()`) both enforce this, but `LocalAiConfig.manifestUrl` — the fetch that supplies
+`sha256`/`revision` in the first place — is never checked, in either `LocalAiClient.create()` or
+`ManifestService`.
+
+**Decision:** `LocalAiClient.create()` throws `ConfigInvalidError` for a `manifestUrl` that doesn't
+start with `https://`, checked once at construction (same place `requirePorts()` already validates
+`config.ports`), rather than inside `ManifestService.refresh()` on every call.
+
+**Why:** an MITM'd or mistyped `http://` manifest fetch can rewrite the entire manifest — including the
+`sha256`/`revision` values the rest of the security model is pinned to — defeating the checksum gate
+even though the artifact download itself stays HTTPS-only. The manifest fetch is the actual root of
+trust; leaving it unchecked while enforcing HTTPS everywhere downstream of it defeats the point.
+
+**How to apply:** one guard clause in `LocalAiClient.create()`, before `ManifestService` is
+constructed. Existing tests already use `https://example.com/manifest.json` as their fixture URL, so
+no test-fixture changes are expected.
+
+### DoS via storage exhaustion — `InsufficientStorageError` never thrown (SEC.3)
+
+**Finding:** `EligibilityService` checks `device.freeDiskBytes < artifact.sizeBytes * 1.15` (TZ §6.2)
+before a model/embedding switch, but that check is gated by the caller-configurable
+`eligibilityPolicy.no` (`'block'` default, overridable to `'warn'`/`'ignore'`) and is only a
+point-in-time snapshot. `DownloadEngine.downloadArtifact()` itself never independently checks free
+space before writing — `InsufficientStorageError` exists in `errors.ts` (already scoped to TZ §6.2 in
+its own doc comment) but is never constructed or thrown anywhere in the codebase.
+
+**Decision:** add `FileSystemPort.freeSpaceBytes(path): Promise<number>` (implemented symmetrically on
+`CapacitorFsAdapter` and `NodeFsAdapter`, per CLAUDE.md's port-symmetry rule — this extends an existing
+port rather than adding a new one, but the same "every port method needs both adapters" expectation
+applies). `DownloadEngine.downloadArtifact()` checks it against `artifact.sizeBytes * 1.15` immediately
+before each download attempt, throwing `InsufficientStorageError` (no write attempted) if insufficient
+— independent of whatever `eligibilityPolicy` the caller configured.
+
+**Why:** `eligibilityPolicy.no: 'warn'|'ignore'` is an explicit, documented escape hatch for the RAM/
+thermal side of eligibility — a product judgment call (TZ §6.4, "is this device *comfortable* running
+this model"). It was never meant to also waive the purely-technical "will this write actually fit on
+disk" question. Filling a user's device storage to zero is a real availability threat to the OS and
+other apps, not just to this library, and shouldn't be reachable just by a consumer choosing a lenient
+eligibility policy.
+
+**How to apply:** new `FileSystemPort` method + two adapter implementations + a contract-test scenario
+under `test/contract/`, following the `new-port` skill's symmetry checklist even though this extends an
+existing port.
+
 ## Implementation/tooling notes (not TZ §16 questions)
 
 Engineering decisions discovered while building, not product questions — logged here for the same

@@ -140,6 +140,14 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
 
   /** Creates and initializes a client from config + optional port overrides. TZ §10. */
   static async create(config: LocalAiConfig): Promise<LocalAiClient> {
+    // SEC.2 (docs/decisions.md's "Security audit (2026-08-11)" section): the
+    // manifest fetch is the actual root of trust the sha256/revision pinning
+    // depends on — every other network call the library makes is already
+    // https-gated (model download, embedding.source.url), so this one can't
+    // be left as the one MITM-able exception.
+    if (!config.manifestUrl.startsWith('https://')) {
+      throw new ConfigInvalidError(`LocalAiConfig.manifestUrl must be an https:// URL, got: ${config.manifestUrl}`);
+    }
     const ports = requirePorts(config.ports);
 
     const database = new Database(ports.sqlite, ports.clock);

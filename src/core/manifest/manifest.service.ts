@@ -9,6 +9,22 @@ const KV_KEY_ETAG = 'manifest:etag';
 
 const HEX64 = /^[a-f0-9]{64}$/i;
 
+/**
+ * Strict basename check for `model.filename`/`embedding.filename` (SEC.1,
+ * `docs/decisions.md`'s "Security audit (2026-08-11)" section). Both fields
+ * flow unchecked from the network into `FileSystemPort.resolvePath()`
+ * (`download-engine.ts`, `local-ai-client.ts`'s old-file cleanup), and
+ * `resolvePath()` itself documents that it trusts its caller rather than
+ * sandboxing against `../` — so this is the actual place a path-traversal
+ * write primitive gets closed, not the adapter layer. No `/`, `\`, or `..`,
+ * must be a bare `<safe-chars>.gguf` basename.
+ */
+const SAFE_FILENAME = /^[A-Za-z0-9][A-Za-z0-9._-]*\.gguf$/;
+
+function isSafeFilename(filename: string): boolean {
+  return SAFE_FILENAME.test(filename) && !filename.includes('..');
+}
+
 /** Result of {@link validateManifest} — either a narrowed, trustworthy manifest, or the list of rules it failed. */
 export type ManifestValidationResult = { ok: true; manifest: LocalAiManifest } | { ok: false; errors: string[] };
 
@@ -39,6 +55,9 @@ export function validateManifest(body: unknown, maxModelParamsB: number): Manife
     if (typeof model.paramsB !== 'number' || model.paramsB > maxModelParamsB) {
       errors.push(`model.paramsB must be a number <= maxModelParamsB (${maxModelParamsB})`);
     }
+    if (!model.filename || !isSafeFilename(model.filename)) {
+      errors.push('model.filename must be a bare basename matching ^[A-Za-z0-9][A-Za-z0-9._-]*\\.gguf$ with no path separators or ".."');
+    }
     if (!model.sha256 || !HEX64.test(model.sha256)) errors.push('model.sha256 is not a valid hex64 string');
     if (typeof model.sizeBytes !== 'number' || model.sizeBytes <= 0) errors.push('model.sizeBytes must be > 0');
     if (typeof model.minRamGb !== 'number' || model.minRamGb <= 0) errors.push('model.minRamGb must be > 0');
@@ -57,6 +76,9 @@ export function validateManifest(body: unknown, maxModelParamsB: number): Manife
   } else {
     if (!embedding.id) errors.push('embedding.id is missing');
     if (typeof embedding.version !== 'number') errors.push('embedding.version is missing or not a number');
+    if (!embedding.filename || !isSafeFilename(embedding.filename)) {
+      errors.push('embedding.filename must be a bare basename matching ^[A-Za-z0-9][A-Za-z0-9._-]*\\.gguf$ with no path separators or ".."');
+    }
     if (!embedding.sha256 || !HEX64.test(embedding.sha256)) errors.push('embedding.sha256 is not a valid hex64 string');
     if (typeof embedding.sizeBytes !== 'number' || embedding.sizeBytes <= 0) errors.push('embedding.sizeBytes must be > 0');
     if (typeof embedding.minRamGb !== 'number' || embedding.minRamGb <= 0) errors.push('embedding.minRamGb must be > 0');

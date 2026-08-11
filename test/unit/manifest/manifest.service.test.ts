@@ -77,6 +77,46 @@ describe('validateManifest', () => {
     expect(validateManifest(body, 4).ok).toBe(false);
   });
 
+  it('rejects a model.filename containing a path separator', () => {
+    const body = validManifestBody();
+    body.model.filename = '../../etc/passwd.gguf';
+    const result = validateManifest(body, 4);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.some((e) => e.includes('model.filename'))).toBe(true);
+  });
+
+  it('rejects a model.filename that is an absolute path', () => {
+    const body = validManifestBody();
+    body.model.filename = '/etc/passwd.gguf';
+    expect(validateManifest(body, 4).ok).toBe(false);
+  });
+
+  it('rejects a model.filename with a backslash', () => {
+    const body = validManifestBody();
+    body.model.filename = '..\\..\\windows\\system32\\evil.gguf';
+    expect(validateManifest(body, 4).ok).toBe(false);
+  });
+
+  it('rejects a model.filename not ending in .gguf', () => {
+    const body = validManifestBody();
+    body.model.filename = 'model__qwen-4b__v1.exe';
+    expect(validateManifest(body, 4).ok).toBe(false);
+  });
+
+  it('rejects an embedding.filename containing ".."', () => {
+    const body = validManifestBody();
+    body.embedding.filename = 'embedding__..__v1.gguf';
+    const result = validateManifest(body, 4);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.some((e) => e.includes('embedding.filename'))).toBe(true);
+  });
+
+  it('accepts a normal dotted-version filename', () => {
+    const body = validManifestBody();
+    body.model.filename = 'model__qwen-4b__v1.2.gguf';
+    expect(validateManifest(body, 4).ok).toBe(true);
+  });
+
   it('rejects a malformed sha256', () => {
     const body = validManifestBody();
     body.model.sha256 = 'not-a-hash';

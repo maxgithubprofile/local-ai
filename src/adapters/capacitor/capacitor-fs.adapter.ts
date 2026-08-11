@@ -1,7 +1,24 @@
 import { Filesystem, Directory } from '@capacitor/filesystem';
+import { Capacitor, registerPlugin } from '@capacitor/core';
 import type { FileSystemPort } from '../../core/ports/filesystem.port.js';
 
 const BASE64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+/**
+ * Minimal slice of `@capgo/capacitor-device-info`'s surface this file needs
+ * (SEC.3) — `@capacitor/filesystem` itself exposes no free-space API.
+ * Duplicated from `capgo-device-info.adapter.ts`'s own minimal interface
+ * rather than imported from it: the two adapters implement different ports
+ * and neither should depend on the other's module for an unrelated reason
+ * (hexagonal boundary is about `core/**`, but keeping adapters independent
+ * of each other avoids an accidental coupling here too).
+ */
+interface DeviceInfoPlugin {
+  getInfo(): Promise<{ storage: { freeBytes?: number } }>;
+}
+
+/** Registration name confirmed in `docs/adr/0005-native-plugin-name-constants.md` — same plugin `capgo-device-info.adapter.ts` registers. */
+const DeviceInfo = registerPlugin<DeviceInfoPlugin>('DeviceInfo');
 
 /** No DOM lib (`atob`/`btoa`) is assumed available — this runs in a WebView, but the build itself targets plain ES2022. */
 function bytesToBase64(bytes: Uint8Array): string {
@@ -123,5 +140,23 @@ export class CapacitorFsAdapter implements FileSystemPort {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Reads `@capgo/capacitor-device-info`'s `storage.freeBytes` (SEC.3) —
+   * `path` is unused (that plugin reports free space for the device's
+   * storage volume as a whole, not per-directory), kept only to satisfy
+   * `FileSystemPort`'s signature symmetrically with `NodeFsAdapter`. Soft
+   * dependency, same pattern as `CapgoDeviceInfoAdapter.getSnapshot()`: if
+   * the plugin isn't installed/available on this platform, resolves `0`
+   * rather than throwing — `DownloadEngine` will then correctly refuse to
+   * download (fail-closed) instead of silently skipping the check.
+   * Untestable from this environment (no device), same residual-risk
+   * pattern as every other Capacitor-adapter claim in this codebase.
+   */
+  async freeSpaceBytes(_path: string): Promise<number> {
+    if (!Capacitor.isPluginAvailable('DeviceInfo')) return 0;
+    const info = await DeviceInfo.getInfo();
+    return info.storage.freeBytes ?? 0;
   }
 }

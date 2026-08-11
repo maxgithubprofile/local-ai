@@ -69,4 +69,15 @@ describe('NodeFsAdapter', () => {
     expect(await adapter.stat(p)).toEqual({ sizeBytes: 5 });
     expect(await adapter.stat(adapter.resolvePath('missing.txt'))).toBeNull();
   });
+
+  it('freeSpaceBytes() returns a positive number for a path that does not exist yet', async () => {
+    const free = await adapter.freeSpaceBytes(adapter.resolvePath('models', 'not-downloaded-yet.gguf'));
+    expect(free).toBeGreaterThan(0);
+  });
+
+  it('freeSpaceBytes() returns a positive number for an existing file', async () => {
+    const p = adapter.resolvePath('a.txt');
+    await adapter.writeFile(p, 'hello');
+    expect(await adapter.freeSpaceBytes(p)).toBeGreaterThan(0);
+  });
 });

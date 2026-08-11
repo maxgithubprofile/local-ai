@@ -77,4 +77,25 @@ export class NodeFsAdapter implements FileSystemPort {
       throw err;
     }
   }
+
+  /**
+   * `fs.promises.statfs()` (Node >=18.15, this package requires >=22.5 per
+   * `package.json`'s `engines`) reports the volume backing the nearest
+   * existing ancestor of `filePath` — `filePath` itself need not exist yet,
+   * which is exactly the case `DownloadEngine` calls this in (SEC.3).
+   */
+  async freeSpaceBytes(filePath: string): Promise<number> {
+    let target = filePath;
+    for (;;) {
+      try {
+        const s = await fs.statfs(target);
+        return s.bavail * s.bsize;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        const parent = path.dirname(target);
+        if (parent === target) throw err; // reached the filesystem root and it's still missing
+        target = parent;
+      }
+    }
+  }
 }

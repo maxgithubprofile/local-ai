@@ -10,7 +10,7 @@ import { WebCryptoHashAdapter } from '../../../src/adapters/shared/web-crypto-ha
 import { NodeSqliteAdapter } from '../../../src/adapters/node-testing/node-sqlite.adapter.js';
 import { FakeClockAdapter } from '../../../src/adapters/node-testing/fake-clock.adapter.js';
 import { Database } from '../../../src/core/db/database.js';
-import { ChecksumMismatchError } from '../../../src/core/errors.js';
+import { ChecksumMismatchError, InsufficientStorageError } from '../../../src/core/errors.js';
 import { createMockDownloadServer } from './mock-http-server.js';
 
 // ROADMAP.md Phase 2 exit criterion, verbatim: "resume after 50% cutoff ->
@@ -124,5 +124,33 @@ describe('DownloadEngine', () => {
     await engine.downloadArtifact(artifact(), { onProgress: (p) => percents.push(p.percent) });
 
     expect(percents[percents.length - 1]).toBe(100);
+  });
+
+  it('throws InsufficientStorageError and never attempts a write when free space is below the 1.15x threshold (SEC.3)', async () => {
+    const starvedFileSystem: typeof fileSystem = Object.create(fileSystem, {
+      freeSpaceBytes: { value: async () => Math.floor(content.length * 1.1) }, // below sizeBytes * 1.15
+    });
+    const engine = new DownloadEngine(new NodeRangeDownloadAdapter(), starvedFileSystem, hash, sqlite, clock, {
+      backoffMs: () => 0,
+    });
+
+    await expect(engine.downloadArtifact(artifact())).rejects.toThrow(InsufficientStorageError);
+
+    expect(mockServer.requestCount).toBe(0); // no HTTP request, let alone a write, was ever attempted
+    const [state] = await sqlite.query<{ status: string }>('SELECT status FROM download_state');
+    expect(state?.status).toBe('failed');
+  });
+
+  it('succeeds once free space is at or above the 1.15x threshold', async () => {
+    const roomyFileSystem: typeof fileSystem = Object.create(fileSystem, {
+      freeSpaceBytes: { value: async () => Math.ceil(content.length * 1.15) },
+    });
+    const engine = new DownloadEngine(new NodeRangeDownloadAdapter(), roomyFileSystem, hash, sqlite, clock, {
+      backoffMs: () => 0,
+    });
+
+    const { destinationPath } = await engine.downloadArtifact(artifact());
+
+    expect(fs.readFileSync(destinationPath).equals(content)).toBe(true);
   });
 });

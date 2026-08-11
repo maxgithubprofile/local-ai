@@ -4,9 +4,11 @@
 breaks each into tasks sized for one agent session (a few files, one testable outcome each), in
 dependency order, so picking up work here doesn't require re-reading the whole TZ every time.
 
-**How to use this file:** pick the first unchecked task whose dependencies are checked. Read the TZ
+**How to use this file:** pick the first `[ ]` task whose dependencies are checked. Read the TZ
 section(s) it cites. If it's blocked by an open question, resolve it (`docs/decisions.md`) or ask
-before guessing. When done, run the `phase-gate` skill before ticking the box.
+before guessing. When done, run the `phase-gate` skill before ticking the box. `[-]` marks a task that
+was deliberately declined/scoped out on request (not merely deferred) — skip it, don't pick it up,
+unless the user asks for it again.
 
 ## Open Questions Ledger
 
@@ -438,7 +440,10 @@ behind each decision below.
   (`docs/decisions.md`'s "Export/backup" entry explains why a bespoke import path would just duplicate
   that). **Done 2026-08-11**, 5 contract-test scenarios including an actual round-trip through a second
   `ConversationStore`, plus a `LocalAiClient` integration test round-tripping through a second client/DB.
-- [ ] **8.5 Message branching (`parentMessageId`)** — explicitly deferred, not started (see above).
+- [-] **8.5 Message branching (`parentMessageId`)** — declined, not started. User explicitly excluded
+  this from Phase 8's 2026-08-11 scoping request (see above) as the most invasive of the 5 post-v1
+  items (schema + `getMessages()`/`sendMessage()` semantics change) — not merely deferred to a later
+  session, but scoped out on request. Re-open only if asked for again.
 
 **Phase 8 exit criterion (informal, no TZ §15 wording — this phase has no design-review-level spec):**
 `pnpm lint`/`typecheck`/`test:unit`/`test:integration`/`test:contract` green, `pnpm run build`/`pnpm
@@ -449,3 +454,65 @@ same "not exercised in this environment" caveat every sqlite-vec/Capacitor-adapt
 ROADMAP already carries — re-run `test/contract/message-search-index.contract.ts` against a real
 `Fts5MessageSearchIndex` on-device (or any Node build with `node:sqlite`'s FTS5 module compiled in)
 before treating it as verified.
+
+---
+
+## Security hardening — 2026-08-11 audit findings
+
+Not a TZ §15 phase — found during a manual security audit of the library as it stood after Phase 8,
+requested by the user. (No `origin` remote is configured in this repo, so the `security-review`
+skill's `git diff origin/HEAD...` pre-hook errored out before loading; the audit was done by hand
+instead, cross-referenced against TZ §14's invariants.) See `docs/decisions.md`'s "Security audit
+(2026-08-11)" section for the full rationale behind each decision below. All three are currently
+unimplemented.
+
+- [x] **SEC.1 Validate `filename` in `validateManifest()`** (`src/core/manifest/manifest.service.ts`)
+  — `model.filename`/`embedding.filename` currently flow unchecked from the network into
+  `FileSystemPort.resolvePath()` (`download-engine.ts`, and `local-ai-client.ts`'s old-file cleanup on
+  a model/embedding switch), and both `resolvePath()` implementations (`node-fs.adapter.ts`,
+  `capacitor-fs.adapter.ts`) are documented as trusting their caller rather than sandboxing against
+  `../` — a path-traversal write primitive if the manifest host is ever compromised or MITM'd (see
+  SEC.2). Add a strict basename check (no `/`, `\`, `..`, must match e.g.
+  `^[A-Za-z0-9][A-Za-z0-9._-]*\.gguf$`) alongside the existing `sha256`/`revision` checks in
+  `validateManifest()`; reject anything else as a `ManifestValidationError`. **Done 2026-08-11** —
+  `isSafeFilename()` guard added for both `model.filename`/`embedding.filename`; 7 new unit tests
+  (`../` traversal, absolute path, backslash, wrong extension, `..` substring, and a dotted-version
+  filename still accepted).
+- [x] **SEC.2 Require `https://` on `LocalAiConfig.manifestUrl`** (`src/core/client/local-ai-client.ts`)
+  — every other network call the library makes is https-gated (model download via the hardcoded
+  `huggingface.co` URL, embedding download via `validateManifest()`'s `embedding.source.url` check),
+  but the manifest fetch itself — the root of trust `sha256`/`revision` pinning depends on — isn't.
+  `LocalAiClient.create()` should throw `ConfigInvalidError` for a non-`https://` `manifestUrl`,
+  mirroring the embedding-URL check's wording, checked once at construction alongside `requirePorts()`.
+  **Done 2026-08-11** — guard added as the first line of `create()`, before `requirePorts()`; 1 new
+  integration test.
+- [x] **SEC.3 Wire up `InsufficientStorageError`** (`src/core/download/download-engine.ts`,
+  `src/core/ports/filesystem.port.ts`) — the error class already exists (`errors.ts`, scoped to TZ
+  §6.2) but nothing in the codebase ever constructs or throws it. `EligibilityService` checks
+  `freeDiskBytes` before a model/embedding switch, but that gate is policy-configurable
+  (`eligibilityPolicy.no: 'warn'|'ignore'`) and only a point-in-time snapshot —
+  `DownloadEngine.downloadArtifact()` itself has no independent check before writing. Add
+  `FileSystemPort.freeSpaceBytes(path): Promise<number>` (Capacitor + Node-testing adapters, port
+  symmetry per CLAUDE.md's `new-port` rule even though this extends an existing port), and have
+  `downloadArtifact()` check `artifact.sizeBytes * 1.15` against it immediately before each download
+  attempt, throwing `InsufficientStorageError` instead of filling the device's storage to 0 bytes free.
+  **Done 2026-08-11** — `NodeFsAdapter.freeSpaceBytes()` via `fs.promises.statfs()` (walks up to the
+  nearest existing ancestor, since the destination file doesn't exist yet at check time);
+  `CapacitorFsAdapter.freeSpaceBytes()` reads `@capgo/capacitor-device-info`'s `storage.freeBytes`
+  directly (`@capacitor/filesystem` itself has no free-space API), same soft-dependency/resolves-`0`-
+  rather-than-throws pattern as `CapgoDeviceInfoAdapter` — untestable from this environment (no
+  device), same residual-risk pattern as every other Capacitor-adapter claim in this ROADMAP.
+  `downloadArtifact()` now checks free space fresh before every attempt (not just once), 2 new
+  integration tests (starved → `InsufficientStorageError`, zero HTTP requests made; roomy → succeeds).
+
+**Exit criterion:** unit tests for SEC.1 (a manifest with a `../`/absolute/non-`.gguf` `filename` is
+rejected) and SEC.2 (a non-`https://` `manifestUrl` throws `ConfigInvalidError`) green; a contract/
+integration test for SEC.3 (an artifact larger than a faked `freeSpaceBytes()` result throws
+`InsufficientStorageError` without attempting a write). **Status: met** — 200 total tests green (110
+unit + 43 integration + 47 contract, up from Phase 8's 189), `pnpm run lint`/`typecheck`/`build` all
+clean. SEC.3's `CapacitorFsAdapter.freeSpaceBytes()` carries the same "not exercised in this
+environment" caveat as every other Capacitor-adapter claim in this ROADMAP — re-verify on a real
+device before a v1 release, same as ADR 0003/0004's residual risk. Two lower-severity findings from
+the same audit pass (unvalidated `embedding.dimensions` reaching a SQL DDL string;
+`HuggingFaceSource.repo`/`.file` going unchecked) were flagged but deliberately not scoped in here —
+see `docs/decisions.md`'s "Security audit (2026-08-11)" section; revisit if/when requested.

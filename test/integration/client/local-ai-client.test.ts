@@ -147,6 +147,12 @@ describe('LocalAiClient', () => {
     ).rejects.toThrow(ConfigInvalidError);
   });
 
+  it('create() throws ConfigInvalidError for a non-https:// manifestUrl (SEC.2)', async () => {
+    await expect(LocalAiClient.create({ manifestUrl: 'http://example.com/manifest.json', ports })).rejects.toThrow(
+      ConfigInvalidError,
+    );
+  });
+
   it('checkSupport() reports inference available with every plugin present', async () => {
     const report = await LocalAiClient.checkSupport({ platformSupport: ports.platformSupport });
     expect(report.capabilities.inference).toBe(true);

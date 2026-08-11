@@ -16,4 +16,14 @@ export interface FileSystemPort {
   stat(path: string): Promise<{ sizeBytes: number } | null>;
   /** Joins segments under the library's storage root (`LocalAiConfig.storageDirectory`, TZ §10). */
   resolvePath(...segments: string[]): string;
+  /**
+   * Bytes free on the volume backing `path` (SEC.3,
+   * `docs/decisions.md`'s "Security audit (2026-08-11)" section) —
+   * `DownloadEngine.downloadArtifact()` checks this against
+   * `artifact.sizeBytes * 1.15` immediately before every download attempt
+   * and throws `InsufficientStorageError` rather than writing, independent
+   * of whatever `eligibilityPolicy` the caller configured (that policy gates
+   * `EligibilityService`'s point-in-time snapshot, not this per-write check).
+   */
+  freeSpaceBytes(path: string): Promise<number>;
 }
