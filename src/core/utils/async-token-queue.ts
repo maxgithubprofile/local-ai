@@ -3,9 +3,10 @@
  * `onTextChunk` and `llama-cpp-capacitor`'s `completion(params, callback)`
  * push tokens via a callback, not an `AsyncIterable`) into the
  * `AsyncIterable<CompletionToken>` half of `CompletionStream` (TZ §10.0).
- * Shared between the Node and Capacitor LLM runtime adapters — pure logic,
- * no platform dependency, so it lives outside both `adapters/node-testing`
- * and `adapters/capacitor` rather than being duplicated in each.
+ * Shared between the Node and Capacitor LLM runtime adapters *and*
+ * `LocalAiClient.sendMessage()` — pure logic, no platform dependency, so it
+ * lives in `core/` rather than under either `adapters/**` (which `core/**`
+ * cannot import from, hexagonal boundary) or being duplicated three times.
  */
 export class AsyncTokenQueue<T> {
   private readonly buffer: T[] = [];

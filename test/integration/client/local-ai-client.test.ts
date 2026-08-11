@@ -75,38 +75,44 @@ const goodDevice: DeviceSnapshot = {
 describe('LocalAiClient', () => {
   let tmpDir: string;
   let modelServer: ReturnType<typeof createMockDownloadServer>;
+  let modelUrl: string;
   let deviceInfo: FakeDeviceInfoAdapter;
   let llmRuntime: FakeLlmRuntimeAdapter;
   let ports: LocalAiPorts;
   let manifestUrl: string;
+  const extraServers: Array<ReturnType<typeof createMockDownloadServer>> = [];
 
-  beforeEach(async () => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-ai-client-'));
-    modelServer = createMockDownloadServer(MODEL_BYTES);
-    const modelUrl = await modelServer.listen();
-    manifestUrl = 'https://example.com/manifest.json';
-
-    const body = manifestBody();
-    // Route both the "model" (HF) and "embedding" (URL) artifact downloads
-    // to the same local mock server — DownloadEngine only cares about the
-    // resolved URL string, not that it's really huggingface.co/example.com.
+  /**
+   * Re-stubs `fetch` to serve `body` for `manifestUrl` and route any
+   * huggingface.co/`body.embedding.source.url` request to `defaultRouteUrl`
+   * (the always-on `modelServer` by default), with per-URL overrides for
+   * tests that need the model/embedding to resolve to *different* mock
+   * servers (e.g. `switchModel()`'s "new version, different bytes").
+   */
+  function stubManifest(body: ReturnType<typeof manifestBody>, routeOverrides: Record<string, string> = {}) {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (url: string, init?: RequestInit) => {
         if (url === manifestUrl) {
-          return new Response(JSON.stringify(body), { status: 200, headers: { etag: '"v1"' } });
+          return new Response(JSON.stringify(body), { status: 200 });
+        }
+        if (url in routeOverrides) {
+          return realFetch(routeOverrides[url]!, init);
         }
         if (url.includes('huggingface.co') || url === body.embedding.source.url) {
-          // Both the "model" (HF) and "embedding" (URL) artifact downloads
-          // route to the same local mock server — DownloadEngine only cares
-          // about the resolved URL string and byte content, not that it's
-          // really huggingface.co/example.com. Use the real fetch
-          // (captured before stubbing) to actually reach it.
           return realFetch(modelUrl, init);
         }
         throw new Error(`unexpected fetch: ${url}`);
       }),
     );
+  }
+
+  beforeEach(async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-ai-client-'));
+    modelServer = createMockDownloadServer(MODEL_BYTES);
+    modelUrl = await modelServer.listen();
+    manifestUrl = 'https://example.com/manifest.json';
+    stubManifest(manifestBody());
 
     deviceInfo = new FakeDeviceInfoAdapter(goodDevice);
     llmRuntime = new FakeLlmRuntimeAdapter();
@@ -130,6 +136,8 @@ describe('LocalAiClient', () => {
   afterEach(async () => {
     vi.unstubAllGlobals();
     await modelServer.close();
+    await Promise.all(extraServers.map((s) => s.close()));
+    extraServers.length = 0;
     await fsp.rm(tmpDir, { recursive: true, force: true });
   });
 
@@ -223,10 +231,7 @@ describe('LocalAiClient', () => {
 
     const invalidBody = manifestBody();
     invalidBody.model.source.revision = 'main';
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => new Response(JSON.stringify(invalidBody), { status: 200 })),
-    );
+    stubManifest(invalidBody);
 
     let invalidEventFired = false;
     client.on('manifest:invalid', () => {
@@ -236,5 +241,179 @@ describe('LocalAiClient', () => {
     const diff = await client.refreshManifest();
     expect(invalidEventFired).toBe(true);
     expect(diff.modelChanged).toBe(false); // still the previously cached manifest, reported as unchanged
+  });
+
+  // --- sendMessage() — TZ §9.3/§9.4/§9.7/§9.8 ---
+
+  it('sendMessage() saves both messages and returns the assistant reply with status "complete"', async () => {
+    const client = await LocalAiClient.create({ manifestUrl, ports });
+    await client.refreshManifest();
+    await client.ensureModelReady();
+    const chat = await client.createChat();
+
+    llmRuntime.scriptedTokens = ['Ahoy', ', ', 'matey!'];
+    const stream = client.sendMessage(chat.id, 'hello there');
+    const chunks: string[] = [];
+    for await (const t of stream) chunks.push(t.token);
+    const assistantMessage = await stream.result;
+
+    expect(assistantMessage.status).toBe('complete');
+    expect(assistantMessage.content).toBe('Ahoy, matey!');
+    expect(chunks.join('')).toBe('Ahoy, matey!');
+
+    const messages = await client.getMessages(chat.id);
+    expect(messages.map((m) => m.role)).toEqual(['user', 'assistant']);
+    expect(messages[0]?.content).toBe('hello there');
+    expect(messages[0]?.status).toBe('complete');
+    expect(messages[1]?.content).toBe('Ahoy, matey!');
+  });
+
+  it('sendMessage() saves the user message even though generation never starts (RuntimeBusyError)', async () => {
+    const client = await LocalAiClient.create({ manifestUrl, ports });
+    await client.refreshManifest();
+    await client.ensureModelReady();
+    const chatA = await client.createChat();
+    const chatB = await client.createChat();
+
+    llmRuntime.scriptedOutcome = 'hang';
+    const controllerA = new AbortController();
+    const first = client.sendMessage(chatA.id, 'first chat message', { signal: controllerA.signal });
+
+    const second = client.sendMessage(chatB.id, 'second chat message, different chat');
+    await expect(second.result).rejects.toMatchObject({ code: 'runtime_busy' });
+
+    const chatBMessages = await client.getMessages(chatB.id);
+    expect(chatBMessages).toHaveLength(1); // user message survived even though the assistant reply never happened
+    expect(chatBMessages[0]?.role).toBe('user');
+
+    controllerA.abort();
+    await first.result;
+  });
+
+  it('sendMessage() with an AbortSignal saves the assistant message as "cancelled" with partial content', async () => {
+    const client = await LocalAiClient.create({ manifestUrl, ports });
+    await client.refreshManifest();
+    await client.ensureModelReady();
+    const chat = await client.createChat();
+
+    llmRuntime.scriptedTokens = ['a', 'b', 'c', 'd', 'e'];
+    const controller = new AbortController();
+    const stream = client.sendMessage(chat.id, 'hi', { signal: controller.signal });
+
+    let seen = 0;
+    for await (const token of stream) {
+      seen += 1;
+      if (token && seen === 2) controller.abort();
+    }
+    const assistantMessage = await stream.result;
+
+    expect(assistantMessage.status).toBe('cancelled');
+    expect(assistantMessage.content.length).toBeGreaterThan(0);
+    expect(assistantMessage.content.length).toBeLessThan('abcde'.length);
+
+    const saved = await client.getMessages(chat.id);
+    expect(saved[1]?.status).toBe('cancelled');
+  });
+
+  it('sendMessage() on a runtime error saves the assistant message as "error"', async () => {
+    const client = await LocalAiClient.create({ manifestUrl, ports });
+    await client.refreshManifest();
+    await client.ensureModelReady();
+    const chat = await client.createChat();
+
+    llmRuntime.scriptedOutcome = 'error';
+    const stream = client.sendMessage(chat.id, 'hi');
+    const assistantMessage = await stream.result;
+
+    expect(assistantMessage.status).toBe('error');
+    const saved = await client.getMessages(chat.id);
+    expect(saved[1]?.status).toBe('error');
+  });
+
+  // --- switchModel() / switchEmbedding() — TZ §5.5/§5.6 ---
+
+  it('switchModel() downloads the new file, releases only the LLM context, deletes the old file, invalidates sessions, and reloads', async () => {
+    const client = await LocalAiClient.create({ manifestUrl, ports });
+    await client.refreshManifest();
+    await client.ensureModelReady();
+    await client.ensureEmbeddingReady();
+
+    const oldModelPath = path.join(tmpDir, 'models', 'model.gguf');
+    expect(fs.existsSync(oldModelPath)).toBe(true);
+
+    const NEW_MODEL_BYTES = Buffer.from('fake-model-weights-v2-content');
+    const newModelServer = createMockDownloadServer(NEW_MODEL_BYTES);
+    extraServers.push(newModelServer);
+    const newModelUrl = await newModelServer.listen();
+
+    const v2Body = manifestBody();
+    v2Body.model.version = 2;
+    v2Body.model.filename = 'model-v2.gguf';
+    v2Body.model.sha256 = hash.sha256(NEW_MODEL_BYTES);
+    v2Body.model.sizeBytes = NEW_MODEL_BYTES.length;
+    stubManifest(v2Body, { 'https://huggingface.co/org/qwen/resolve/abc123def456/model.gguf': newModelUrl });
+
+    await client.refreshManifest();
+
+    let unloadedReason: string | undefined;
+    client.on('runtime:unloaded', (e) => {
+      unloadedReason = e.reason;
+    });
+
+    await client.switchModel();
+
+    expect(unloadedReason).toBe('model-switch');
+    expect(fs.existsSync(oldModelPath)).toBe(false); // old file deleted (TZ §5.5 step 6)
+    expect(fs.existsSync(path.join(tmpDir, 'models', 'model-v2.gguf'))).toBe(true);
+    expect(llmRuntime.modelLoaded).toBe(true); // reloaded with the new weights
+    expect(llmRuntime.embeddingModelLoaded).toBe(true); // untouched (TZ §5.5 step 4 — LLM context only)
+  });
+
+  it('switchEmbedding() emits vector-store:embedding-changed with dimensionsChanged and leaves the model untouched', async () => {
+    const client = await LocalAiClient.create({ manifestUrl, ports });
+    await client.refreshManifest();
+    await client.ensureModelReady();
+    await client.ensureEmbeddingReady();
+
+    const NEW_EMBEDDING_BYTES = Buffer.from('fake-embedding-weights-v2-content');
+    const newEmbeddingServer = createMockDownloadServer(NEW_EMBEDDING_BYTES);
+    extraServers.push(newEmbeddingServer);
+    const newEmbeddingUrl = await newEmbeddingServer.listen();
+
+    const v2Body = manifestBody();
+    v2Body.embedding.version = 2;
+    v2Body.embedding.filename = 'embedding-v2.gguf';
+    v2Body.embedding.dimensions = 8; // was 4
+    v2Body.embedding.sha256 = hash.sha256(NEW_EMBEDDING_BYTES);
+    v2Body.embedding.sizeBytes = NEW_EMBEDDING_BYTES.length;
+    stubManifest(v2Body, { 'https://example.com/embedding.gguf': newEmbeddingUrl });
+
+    await client.refreshManifest();
+
+    let event: { dimensionsChanged: boolean; current: { dimensions: number } } | undefined;
+    client.on('vector-store:embedding-changed', (e) => {
+      event = e;
+    });
+
+    await client.switchEmbedding();
+
+    expect(event?.dimensionsChanged).toBe(true);
+    expect(event?.current.dimensions).toBe(8);
+    expect(llmRuntime.embeddingModelLoaded).toBe(true);
+    expect(llmRuntime.modelLoaded).toBe(true); // untouched (TZ §5.6 — embedding context only)
+  });
+
+  // --- ConversationSyncApi (Mode B, TZ §9.6) ---
+
+  it('upsertChat()/appendMessages() work end to end through LocalAiClient', async () => {
+    const client = await LocalAiClient.create({ manifestUrl, ports });
+
+    await client.upsertChat({ id: 'host-chat-1', title: 'From host app' });
+    const result = await client.appendMessages('host-chat-1', [
+      { id: 'm1', role: 'user', content: 'hi', createdAt: '2026-01-01T00:00:00.000Z' },
+    ]);
+
+    expect(result).toEqual({ inserted: 1, skippedExisting: 0 });
+    expect(await client.getMessages('host-chat-1')).toHaveLength(1);
   });
 });

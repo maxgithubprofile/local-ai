@@ -256,26 +256,55 @@ stays an open item before a v1 release, same as ADR 0004's residual risk.
 
 ## Phase 5 — Session-cache + multi-chat + context policy + `ConversationSyncApi` (TZ §15 row 5)
 
-- [ ] **5.1 `SessionCache`** (`src/core/conversations/session-cache.ts`) — single hot-slot per TZ
-  §9.3; rebuild-from-SQL fallback on missing/corrupt/incompatible session file.
-- [ ] **5.2 `sendMessage()`** on `LocalAiClient` (MVP `ConversationApi`) — user message saved before
-  generation starts (TZ §9.8), `RuntimeBusyError` on concurrent chat generation.
-- [ ] **5.3 Context window policy** — `contextStrategy`/`maxContextTokens` per TZ §9.7's algorithm
-  (`fail` / `truncate-oldest` / `truncate-to-fit`); pure function, unit-testable without a model.
-  ⚠ default value blocked by §16.17 — bootstrap/TZ default is `'truncate-oldest'`.
-- [ ] **5.4 Cancel/error status semantics** — `status: 'complete'|'cancelled'|'error'` per TZ §9.8's
-  table; fake `LlmRuntimePort` emulating an `AbortSignal` mid-stream and a thrown runtime error.
-- [ ] **5.5 Model/embedding switch flows** — `switchModel()`/`switchEmbedding()` implementing TZ
-  §5.5/§5.6's safe ordering exactly, incl. session-cache invalidation on model switch and
-  `vector-store:embedding-changed` on embedding switch.
-- [ ] **5.6 `ConversationSyncApi`** (`upsertChat`/`appendMessages`, Mode B, TZ §9.6) — idempotent
-  upsert/append semantics, dedup by `(chatId, id)`. ⚠ whether this ships in v1 at all is §16.16 —
-  implement regardless (it's cheap once 3.4 exists) but treat the *release* decision as separate from
-  the *implementation* task.
+- [x] **5.1 `SessionCache`** (`src/core/conversations/session-cache.ts`) — single hot-slot per TZ
+  §9.3; model fingerprint (`${id}:${version}`) embedded directly in the session filename rather than
+  tracked in separate metadata, so a stale/wrong-version file is indistinguishable from "no file" —
+  `activate()` naturally falls back to cold-start without needing a side table. Corrupt/incompatible
+  `loadSession()` failure deletes the bad file and also falls back. `invalidateAll()` (model switch)/
+  `deleteForChat()` (chat deletion cascade) both implemented. **Done 2026-08-10**, 7 unit tests.
+- [x] **5.2 `sendMessage()`** on `LocalAiClient` (MVP `ConversationApi`) — user message saved before
+  generation starts (TZ §9.8, first step inside the returned stream's `result`, so it's durable even
+  if `RuntimeFacade.complete()` immediately rejects with `RuntimeBusyError`). **Done 2026-08-10.**
+  Caught a real hang bug while writing the integration test: the forwarding loop that relays tokens
+  from `RuntimeFacade`'s stream into `sendMessage()`'s own `AsyncTokenQueue` never closed that queue
+  on the happy path (only on rejection) — every real `for await` consumer would have hung forever
+  after the last token. Fixed before this task was marked done.
+- [x] **5.3 Context window policy** (`src/core/conversations/context-window-policy.ts`) —
+  `contextStrategy`/`maxContextTokens` per TZ §9.7's algorithm (`fail` / `truncate-oldest` /
+  `truncate-to-fit`, walked newest-to-oldest, system message always kept); pure function taking an
+  injectable token estimator, unit-tested without a model (8 tests) — `sendMessage()` resolves real
+  per-message token counts via `LlmRuntimePort.countTokens()` *before* calling it, falling back to the
+  chars/4 heuristic only if that call itself fails. Default `maxContextTokens` = `model.contextLength
+  − (completionOptions.maxTokens ?? 512) − 64` safety margin, per TZ's stated formula. §16.17 (default
+  strategy) stays open as a product question — `'truncate-oldest'` is what ships as the default either
+  way, per the TZ/bootstrap's already-stated default.
+- [x] **5.4 Cancel/error status semantics** — `status: 'complete'|'cancelled'|'error'` per TZ §9.8's
+  table, verified end-to-end (not just at the port level) via 3 integration tests: normal completion,
+  `AbortSignal` mid-stream (partial content preserved, saved as `'cancelled'`), and a scripted runtime
+  error (saved as `'error'`). `FakeLlmRuntimeAdapter` (pulled forward into Phase 4 already) is the fake
+  this task called for. **Done 2026-08-10.**
+- [x] **5.5 Model/embedding switch flows** — `switchModel()`/`switchEmbedding()` implementing TZ
+  §5.5/§5.6's safe ordering exactly: eligibility gate → download+verify → release *only* the relevant
+  runtime context → `ModelRegistry.setCurrent()` (new, `src/core/registry/model-registry.ts` —
+  `installed_artifacts` bookkeeping, migration 003 added `dimensions` for the embedding-changed event)
+  → delete the old file → session-cache invalidation (model switch) /
+  `vector-store:embedding-changed` with a correct `dimensionsChanged` (embedding switch) → reload.
+  **Done 2026-08-10**, 2 integration tests confirming the old file is deleted, the *other* context is
+  left untouched, and the client ends up reloaded and ready.
+- [x] **5.6 `ConversationSyncApi`** (`upsertChat`/`appendMessages`, Mode B, TZ §9.6) — idempotent
+  upsert/append semantics on `ConversationStore` (dedup by `(chatId, id)` via `INSERT ... ON CONFLICT
+  DO NOTHING RETURNING id`, so "was this actually new" is answered in the same round-trip), wired
+  through `LocalAiClient`. **Done 2026-08-10**, 6 contract-test scenarios + 1 `LocalAiClient`
+  integration test. §16.16 (ship in v1 at all) stays open as a product question per `docs/decisions.md`.
 
 **Phase 5 exit criterion (TZ §15):** switching chats doesn't lose history; a long conversation
 truncates per policy without crashing; cancellation preserves a partial `'cancelled'` response;
-second response in the same chat is measurably faster (session reuse).
+second response in the same chat is measurably faster (session reuse). **Status: functionally met** —
+148 total tests green (89 unit + 26 integration + 33 contract). The "measurably faster" half of the
+last claim is a real-device performance characteristic of the native plugin's KV-cache reuse, not
+something this environment's `FakeLlmRuntimeAdapter`/tiny-fixture `NodeLlamaCppAdapter` tests can
+demonstrate — `SessionCache.activate()`'s cache-hit-vs-cold-start behavior is verified functionally
+(7 unit tests), not benchmarked.
 
 ---
 

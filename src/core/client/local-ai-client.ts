@@ -8,8 +8,11 @@ import { SupportChecker } from '../support/support-checker.js';
 import { EligibilityService } from '../support/eligibility-service.js';
 import { Database } from '../db/database.js';
 import { ConversationStore } from '../conversations/conversation-store.js';
+import { SessionCache } from '../conversations/session-cache.js';
+import { buildContextWindow, defaultMaxContextTokens, estimateTokensHeuristic } from '../conversations/context-window-policy.js';
 import { RuntimeFacade } from '../runtime/runtime-facade.js';
 import { DownloadEngine } from '../download/download-engine.js';
+import { ModelRegistry } from '../registry/model-registry.js';
 import {
   ConfigInvalidError,
   DeviceNotEligibleError,
@@ -31,6 +34,7 @@ import type {
 import type { Chat, ChatMessage, ConversationApi, ConversationSyncApi } from '../conversations/conversation.types.js';
 import type { VectorEntry, VectorSearchHit } from '../db/vector-store.js';
 import type { LocalAiManifest } from '../manifest/manifest.schema.js';
+import { AsyncTokenQueue } from '../utils/async-token-queue.js';
 
 /** Constructor options for {@link LocalAiClient.create} — TZ §10. */
 export interface LocalAiConfig {
@@ -96,15 +100,10 @@ function rejectedCompletionStream<T>(error: Error): CompletionStream<T> {
 }
 
 /**
- * Single public entry point — TZ §10. `create()`/`checkSupport()`/
- * `checkDeviceEligibility()`/`resetLocalVerdicts()`/`refreshManifest()`/
- * `ensureModelReady()`/`ensureEmbeddingReady()`/`ensureReady()`/`complete()`/
- * `embed()`/`on()`/the Mode-A `ConversationApi` CRUD methods are real
- * (ROADMAP.md Phase 4, plus the CRUD methods pulled forward since
- * `ConversationStore` already existed from Phase 3 — see that phase's
- * status note). `sendMessage()`/`switchModel()`/`switchEmbedding()`/
- * `vectors.*`/`releaseRuntime()`/lifecycle methods remain stubs — Phase
- * 5/6 own those.
+ * Single public entry point — TZ §10. Every method except `sendMessage()`'s
+ * cancel/error partial-content edge cases documented in TZ §9.8 (see that
+ * method's own comment) is real. `destroy()` remains a stub — Phase 6
+ * (`LifecycleManager`) owns it.
  */
 export class LocalAiClient implements ConversationApi, ConversationSyncApi {
   private currentManifest: LocalAiManifest | null = null;
@@ -120,6 +119,8 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
     private readonly eligibilityService: EligibilityService,
     private readonly database: Database,
     private readonly conversationStore: ConversationStore,
+    private readonly sessionCache: SessionCache,
+    private readonly modelRegistry: ModelRegistry,
     private readonly runtimeFacade: RuntimeFacade,
     private readonly downloadEngine: DownloadEngine,
   ) {}
@@ -135,6 +136,8 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
     const supportChecker = new SupportChecker(ports.platformSupport);
     const eligibilityService = new EligibilityService(ports.deviceInfo, ports.sqlite, ports.clock);
     const conversationStore = new ConversationStore(ports.sqlite, ports.clock);
+    const sessionCache = new SessionCache(ports.llmRuntime, ports.fileSystem);
+    const modelRegistry = new ModelRegistry(ports.sqlite, ports.clock);
     const runtimeFacade = new RuntimeFacade(ports.llmRuntime);
     const downloadEngine = new DownloadEngine(ports.downloadTransport, ports.fileSystem, ports.hash, ports.sqlite, ports.clock);
 
@@ -146,6 +149,8 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
       eligibilityService,
       database,
       conversationStore,
+      sessionCache,
+      modelRegistry,
       runtimeFacade,
       downloadEngine,
     );
@@ -267,6 +272,16 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
     if (!this.modelLoaded) {
       await this.ports.llmRuntime.loadModel({ modelPath: destinationPath, contextLength: artifact.contextLength });
       this.modelLoaded = true;
+      // Registers this as "current" even on a completely fresh install (no
+      // prior row) — switchModel() needs an accurate baseline to compute
+      // "previous" against on its very first call, not just after a switch.
+      await this.modelRegistry.setCurrent('model', {
+        id: artifact.id,
+        version: artifact.version,
+        filename: artifact.filename,
+        sha256: artifact.sha256,
+        sizeBytes: artifact.sizeBytes,
+      });
       this.emit('runtime:model-loaded', { modelId: artifact.id, version: artifact.version });
     }
   }
@@ -289,6 +304,14 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
     if (!this.embeddingLoaded) {
       await this.ports.llmRuntime.loadEmbeddingModel({ modelPath: destinationPath });
       this.embeddingLoaded = true;
+      await this.modelRegistry.setCurrent('embedding', {
+        id: artifact.id,
+        version: artifact.version,
+        filename: artifact.filename,
+        sha256: artifact.sha256,
+        sizeBytes: artifact.sizeBytes,
+        dimensions: artifact.dimensions,
+      });
       this.emit('runtime:embedding-loaded', { embeddingId: artifact.id, version: artifact.version });
     }
   }
@@ -298,14 +321,105 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
     await this.ensureEmbeddingReady(options);
   }
 
-  /** Safe update ordering per TZ §5.5. */
-  async switchModel(_options?: { onProgress?: (p: DownloadProgress) => void }): Promise<void> {
-    throw new Error(NOT_IMPLEMENTED);
+  /**
+   * Safe update ordering per TZ §5.5: eligibility gate → download + verify
+   * → release the LLM context only → register as current → delete the old
+   * model file → invalidate every session-cache file (their KV content is
+   * tied to the exact old weights) → reload. Re-checks
+   * `refreshManifest()`'s diff isn't this method's job — call it when
+   * `ManifestDiff.modelChanged` is what you want to act on; `switchModel()`
+   * always targets whatever `manifest.model` currently is.
+   */
+  async switchModel(options?: { onProgress?: (p: DownloadProgress) => void }): Promise<void> {
+    await this.ensureSupportOk();
+    await this.ensureManifestLoaded();
+    const artifact = this.currentManifest!.model;
+
+    this.applyEligibilityPolicy(await this.checkDeviceEligibility('model')); // step 1
+
+    const { destinationPath } = await this.downloadEngine.downloadArtifact(
+      // steps 2-3 — DownloadEngine verifies sha256 itself before resolving
+      { kind: 'model', filename: artifact.filename, url: resolveArtifactUrl(artifact), sha256: artifact.sha256, sizeBytes: artifact.sizeBytes },
+      { onProgress: (p) => { options?.onProgress?.(p); this.emit('download:progress', p); } },
+    );
+    this.emit('download:completed', { key: destinationPath, kind: 'model' });
+
+    await this.ports.llmRuntime.releaseModel(); // step 4 — LLM context only, embedding context untouched
+    this.modelLoaded = false;
+    this.emit('runtime:unloaded', { reason: 'model-switch' });
+
+    const { previous } = await this.modelRegistry.setCurrent('model', {
+      id: artifact.id,
+      version: artifact.version,
+      filename: artifact.filename,
+      sha256: artifact.sha256,
+      sizeBytes: artifact.sizeBytes,
+    }); // step 5
+
+    if (previous && previous.filename !== artifact.filename) {
+      // step 6 — old file, never the one we just downloaded
+      await this.ports.fileSystem.deleteFile(this.ports.fileSystem.resolvePath('models', previous.filename)).catch(() => undefined);
+    }
+
+    await this.sessionCache.invalidateAll(); // step 7
+
+    await this.ports.llmRuntime.loadModel({ modelPath: destinationPath, contextLength: artifact.contextLength });
+    this.modelLoaded = true;
+    this.emit('runtime:model-loaded', { modelId: artifact.id, version: artifact.version });
   }
 
-  /** Safe update ordering per TZ §5.6. */
-  async switchEmbedding(_options?: { onProgress?: (p: DownloadProgress) => void }): Promise<void> {
-    throw new Error(NOT_IMPLEMENTED);
+  /**
+   * Safe update ordering per TZ §5.6 — independent of {@link switchModel}:
+   * eligibility gate → download + verify → release the embedding context
+   * only → register as current → delete the old embedding file → emit
+   * `vector-store:embedding-changed` (never auto-reindexes existing
+   * vectors — `VectorStore`'s space guard, TZ §8.2/§8.3, is what actually
+   * blocks stale reads/writes until an explicit `vectors.reindex()`)
+   * → reload.
+   */
+  async switchEmbedding(options?: { onProgress?: (p: DownloadProgress) => void }): Promise<void> {
+    await this.ensureSupportOk();
+    await this.ensureManifestLoaded();
+    const artifact = this.currentManifest!.embedding;
+
+    this.applyEligibilityPolicy(await this.checkDeviceEligibility('embedding'));
+
+    const { destinationPath } = await this.downloadEngine.downloadArtifact(
+      { kind: 'embedding', filename: artifact.filename, url: resolveArtifactUrl(artifact), sha256: artifact.sha256, sizeBytes: artifact.sizeBytes },
+      { onProgress: (p) => { options?.onProgress?.(p); this.emit('download:progress', p); } },
+    );
+    this.emit('download:completed', { key: destinationPath, kind: 'embedding' });
+
+    const previousArtifact = await this.modelRegistry.getCurrent('embedding');
+
+    await this.ports.llmRuntime.releaseEmbeddingModel();
+    this.embeddingLoaded = false;
+    this.emit('runtime:unloaded', { reason: 'embedding-switch' });
+
+    const { previous } = await this.modelRegistry.setCurrent('embedding', {
+      id: artifact.id,
+      version: artifact.version,
+      filename: artifact.filename,
+      sha256: artifact.sha256,
+      sizeBytes: artifact.sizeBytes,
+      dimensions: artifact.dimensions,
+    });
+
+    if (previous && previous.filename !== artifact.filename) {
+      await this.ports.fileSystem.deleteFile(this.ports.fileSystem.resolvePath('embeddings', previous.filename)).catch(() => undefined);
+    }
+
+    this.emit('vector-store:embedding-changed', {
+      previous: previousArtifact
+        ? { id: previousArtifact.id, version: previousArtifact.version, dimensions: previousArtifact.dimensions ?? 0 }
+        : undefined,
+      current: { id: artifact.id, version: artifact.version, dimensions: artifact.dimensions },
+      dimensionsChanged: previousArtifact ? previousArtifact.dimensions !== artifact.dimensions : true,
+    });
+
+    await this.ports.llmRuntime.loadEmbeddingModel({ modelPath: destinationPath });
+    this.embeddingLoaded = true;
+    this.emit('runtime:embedding-loaded', { embeddingId: artifact.id, version: artifact.version });
   }
 
   complete(input: CompletionInput, signal?: AbortSignal): CompletionStream<CompletionResult> {
@@ -351,6 +465,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
 
   async deleteChat(chatId: string): Promise<void> {
     await this.conversationStore.deleteChat(chatId);
+    await this.sessionCache.deleteForChat(chatId); // the other half of TZ §9.2's cascade — SQL + session file
     this.emit('chat:deleted', { chatId });
   }
 
@@ -358,34 +473,128 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
     return this.conversationStore.getMessages(chatId, options);
   }
 
+  /**
+   * MVP `ConversationApi.sendMessage()` — TZ §9.3/§9.4/§9.7/§9.8. The user
+   * message is saved *before* generation starts, in the very first step of
+   * the returned stream's `result`, so it survives even a same-tick
+   * `RuntimeBusyError` (TZ §9.8). Cancel/error semantics per TZ §9.8's
+   * table: a normal completion, an `AbortSignal` cancellation, and a
+   * runtime error *all* resolve `result` with a `ChatMessage` (status
+   * `'complete'`/`'cancelled'`/`'error'` respectively) — `result` only
+   * *rejects* when generation never started at all (`RuntimeBusyError`,
+   * `ContextWindowExceededError`), in which case the user message is still
+   * safely persisted, just with no assistant reply.
+   */
   sendMessage(
-    _chatId: string,
-    _text: string,
-    _options?: {
+    chatId: string,
+    text: string,
+    options?: {
       userMessageId?: string;
       assistantMessageId?: string;
       completionOptions?: CompletionOptions;
       signal?: AbortSignal;
     },
   ): CompletionStream<ChatMessage> {
-    throw new Error(NOT_IMPLEMENTED);
+    if (!this.modelLoaded || !this.currentManifest) {
+      return rejectedCompletionStream(new RuntimeInitError('call ensureModelReady() before sendMessage()'));
+    }
+    const manifest = this.currentManifest;
+    const userMessageId = options?.userMessageId ?? globalThis.crypto.randomUUID();
+    const assistantMessageId = options?.assistantMessageId ?? globalThis.crypto.randomUUID();
+    const queue = new AsyncTokenQueue<CompletionToken>();
+
+    const result = (async (): Promise<ChatMessage> => {
+      // Step 1 (TZ §9.8) — save the user message before anything else can fail.
+      const userCreatedAt = this.ports.clock.nowIso();
+      await this.conversationStore.addMessage(chatId, {
+        id: userMessageId,
+        role: 'user',
+        content: text,
+        status: 'complete',
+        createdAt: userCreatedAt,
+      });
+      this.emit('chat:message-appended', { chatId, messageId: userMessageId, role: 'user' });
+
+      // Build the context window from the full persisted history (which now includes the message just saved).
+      const history = await this.conversationStore.getMessages(chatId);
+      const withTokenCounts = await Promise.all(
+        history.map(async (m) => ({
+          role: m.role,
+          content: m.content,
+          tokenCount: m.tokenCount ?? (await this.ports.llmRuntime.countTokens(m.content).catch(() => estimateTokensHeuristic(m.content))),
+        })),
+      );
+      const maxContextTokens =
+        this.config.maxContextTokens ?? defaultMaxContextTokens(manifest.model.contextLength, options?.completionOptions?.maxTokens);
+      // May throw ContextWindowExceededError ('fail' strategy) — the whole
+      // `result` promise rejects here, which is correct: generation never
+      // started, but the user message above is already durably saved.
+      const windowed = buildContextWindow(withTokenCounts, {
+        maxContextTokens,
+        contextStrategy: this.config.contextStrategy ?? 'truncate-oldest',
+        estimateTokens: estimateTokensHeuristic,
+      });
+
+      // Best-effort perf hook (TZ §9.3) — every adapter still receives the
+      // full windowed history either way, so a cold start here never
+      // changes correctness, only how much KV state the native plugin gets
+      // to reuse under the hood.
+      const modelFingerprint = `${manifest.model.id}:${manifest.model.version}`;
+      await this.sessionCache.activate(chatId, modelFingerprint).catch(() => ({ loadedFromCache: false }));
+
+      const stream = this.runtimeFacade.complete(
+        { messages: windowed.messages, options: options?.completionOptions },
+        { chatTemplate: manifest.model.chatTemplate },
+        options?.signal,
+      );
+      const forwarding = (async () => {
+        for await (const token of stream) queue.push(token);
+        queue.close(); // our own queue is a separate instance from the facade's — draining its source doesn't close it for us
+      })();
+
+      // May reject here (RuntimeBusyError from a concurrent chat, TZ §9.4)
+      // — again correct per TZ §9.8: the user message is already saved.
+      const completion = await stream.result;
+      await forwarding;
+
+      const assistantMessage: ChatMessage = {
+        id: assistantMessageId,
+        chatId,
+        role: 'assistant',
+        content: completion.content,
+        status: completion.status,
+        createdAt: this.ports.clock.nowIso(),
+        tokenCount: completion.tokenCount,
+      };
+      await this.conversationStore.addMessage(chatId, assistantMessage);
+      this.emit('chat:message-appended', { chatId, messageId: assistantMessageId, role: 'assistant' });
+
+      if (completion.status === 'complete') {
+        await this.sessionCache.save(chatId, modelFingerprint).catch(() => undefined); // best-effort, TZ §9.3 step 4
+      }
+      return assistantMessage;
+    })();
+    result.catch(() => queue.close()); // ensure the iterable side always terminates, even if we threw before `stream` existed
+
+    return { [Symbol.asyncIterator]: () => queue[Symbol.asyncIterator](), result };
   }
 
   // --- ConversationSyncApi (optional, TZ §9.2/§9.6) — Mode B ---
+  // Pass-through to ConversationStore, same pattern as the Mode-A methods above.
 
-  async upsertChat(_chat: {
+  async upsertChat(chat: {
     id: string;
     title: string;
     createdAt?: string;
     updatedAt?: string;
     metadata?: Record<string, unknown>;
   }): Promise<Chat> {
-    throw new Error(NOT_IMPLEMENTED);
+    return this.conversationStore.upsertChat(chat);
   }
 
   async appendMessages(
-    _chatId: string,
-    _messages: Array<{
+    chatId: string,
+    messages: Array<{
       id: string;
       role: ChatMessage['role'];
       content: string;
@@ -395,7 +604,11 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
       metadata?: Record<string, unknown>;
     }>,
   ): Promise<{ inserted: number; skippedExisting: number }> {
-    throw new Error(NOT_IMPLEMENTED);
+    const result = await this.conversationStore.appendMessages(chatId, messages);
+    for (const m of messages) {
+      this.emit('chat:message-appended', { chatId, messageId: m.id, role: m.role });
+    }
+    return result;
   }
 
   /** Thin sugar over `VectorStore` that auto-fills `VectorSpaceDescriptor` from the active embedding. TZ §8.2, §10. */

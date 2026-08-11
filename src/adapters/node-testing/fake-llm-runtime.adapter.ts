@@ -1,6 +1,8 @@
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import type { LlmRuntimePort } from '../../core/ports/llm-runtime.port.js';
 import type { CompletionInput, CompletionResult, CompletionStream, CompletionToken } from '../../core/types.js';
-import { AsyncTokenQueue } from '../shared/async-token-queue.js';
+import { AsyncTokenQueue } from '../../core/utils/async-token-queue.js';
 
 /**
  * Controllable `LlmRuntimePort` fake — drives `RuntimeFacade`/`LocalAiClient`
@@ -86,7 +88,27 @@ export class FakeLlmRuntimeAdapter implements LlmRuntimePort {
     return { tgAvg: 42 };
   }
 
-  async saveSession(): Promise<void> {}
+  readonly savedSessionPaths: string[] = [];
+  readonly loadedSessionPaths: string[] = [];
+  /** Simulates a corrupt/incompatible-version session file (TZ §9.3's rebuild-from-SQL fallback trigger). */
+  shouldFailLoadSession = false;
 
-  async loadSession(): Promise<void> {}
+  /**
+   * Writes/reads a trivial real file at `sessionPath` — real runtime
+   * adapters (`NodeLlamaCppAdapter`/`LlamaCppCapacitorAdapter`) genuinely
+   * write bytes to that path via the native plugin, and `SessionCache`
+   * decides cold-start-vs-cache-hit by checking `FileSystemPort.exists()`
+   * on it — a no-op fake here would silently break every
+   * `SessionCache` test that checks for the file's presence.
+   */
+  async saveSession(sessionPath: string): Promise<void> {
+    this.savedSessionPaths.push(sessionPath);
+    await fs.mkdir(path.dirname(sessionPath), { recursive: true });
+    await fs.writeFile(sessionPath, 'fake-session-marker');
+  }
+
+  async loadSession(sessionPath: string): Promise<void> {
+    this.loadedSessionPaths.push(sessionPath);
+    if (this.shouldFailLoadSession) throw new Error('simulated corrupt/incompatible session file');
+  }
 }

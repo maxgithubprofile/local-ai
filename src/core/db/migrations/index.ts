@@ -1,5 +1,6 @@
 import { sql as sql001 } from './001_init.js';
 import { sql as sql002 } from './002_vector_entries.js';
+import { sql as sql003 } from './003_installed_artifacts_dimensions.js';
 
 /** One numbered migration — applied in order, tracked by `id` in `_local_ai_migrations`. */
 export interface Migration {
@@ -17,4 +18,5 @@ export interface Migration {
 export const MIGRATIONS: Migration[] = [
   { id: 1, name: '001_init', sql: sql001 },
   { id: 2, name: '002_vector_entries', sql: sql002 },
+  { id: 3, name: '003_installed_artifacts_dimensions', sql: sql003 },
 ];

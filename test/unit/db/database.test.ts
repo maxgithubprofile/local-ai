@@ -43,6 +43,7 @@ describe('Database.migrate()', () => {
     expect(rows).toEqual([
       { id: 1, name: '001_init', applied_at: '2026-03-01T12:00:00.000Z' },
       { id: 2, name: '002_vector_entries', applied_at: '2026-03-01T12:00:00.000Z' },
+      { id: 3, name: '003_installed_artifacts_dimensions', applied_at: '2026-03-01T12:00:00.000Z' },
     ]);
   });
 
@@ -77,7 +78,7 @@ describe('Database.migrate()', () => {
     await new Database(sqlite, clock).migrate();
 
     const rows = await sqlite.query<{ id: number }>('SELECT id FROM _local_ai_migrations ORDER BY id');
-    expect(rows.map((r) => r.id)).toEqual([1, 2]);
+    expect(rows.map((r) => r.id)).toEqual([1, 2, 3]);
     const tables = await sqlite.query<{ name: string }>(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'vector_entries'",
     );

@@ -3,7 +3,7 @@ import type { Llama, LlamaModel, LlamaContext, LlamaContextSequence, LlamaEmbedd
 import type { LlmRuntimePort } from '../../core/ports/llm-runtime.port.js';
 import type { CompletionInput, CompletionResult, CompletionStream, CompletionToken } from '../../core/types.js';
 import { RuntimeInitError } from '../../core/errors.js';
-import { AsyncTokenQueue } from '../shared/async-token-queue.js';
+import { AsyncTokenQueue } from '../../core/utils/async-token-queue.js';
 
 type ChatHistoryItem =
   | { type: 'system'; text: string }

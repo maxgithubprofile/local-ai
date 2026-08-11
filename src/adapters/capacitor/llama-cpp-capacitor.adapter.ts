@@ -3,7 +3,7 @@ import type { LlamaContext, LlamaCppOAICompatibleMessage } from 'llama-cpp-capac
 import type { LlmRuntimePort } from '../../core/ports/llm-runtime.port.js';
 import type { CompletionInput, CompletionResult, CompletionStream, CompletionToken } from '../../core/types.js';
 import { RuntimeInitError } from '../../core/errors.js';
-import { AsyncTokenQueue } from '../shared/async-token-queue.js';
+import { AsyncTokenQueue } from '../../core/utils/async-token-queue.js';
 
 function toOaiMessages(messages: CompletionInput['messages']): LlamaCppOAICompatibleMessage[] {
   return messages.map((m) => ({ role: m.role, content: m.content }));
