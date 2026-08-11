@@ -33,7 +33,8 @@ import type {
   Unsubscribe,
 } from '../types.js';
 import type { Chat, ChatMessage, ConversationApi, ConversationSyncApi } from '../conversations/conversation.types.js';
-import type { VectorEntry, VectorSearchHit } from '../db/vector-store.js';
+import type { VectorEntry, VectorSearchHit, VectorSpaceDescriptor, VectorStore } from '../db/vector-store.js';
+import { createVectorStore } from '../db/create-vector-store.js';
 import type { LocalAiManifest } from '../manifest/manifest.schema.js';
 import { AsyncTokenQueue } from '../utils/async-token-queue.js';
 
@@ -105,6 +106,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
   private currentManifest: LocalAiManifest | null = null;
   private modelLoaded = false;
   private embeddingLoaded = false;
+  private vectorStore: VectorStore | null = null;
   private readonly listeners = new Map<keyof LocalAiEventMap, Set<(payload: never) => void>>();
 
   private constructor(
@@ -154,6 +156,14 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
       lifecycleManager,
     );
     client.currentManifest = await manifestService.getCachedManifest();
+
+    // TZ §8.3 — opportunistic sqlite-vec, brute-force fallback if it doesn't
+    // pan out on this device; either way vectors.* below just works.
+    const { store, usedFallback } = await createVectorStore(ports.sqlite, ports.clock);
+    client.vectorStore = store;
+    if (usedFallback) {
+      client.emit('vector-store:fallback-active', { reason: 'sqlite-vec unavailable or failed its self-test on this device' });
+    }
 
     // TZ §11.2 — opt-in only, default false; never an eager reload on refocus.
     if (config.autoUnloadOnBackground) {
@@ -616,20 +626,45 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
     return result;
   }
 
-  /** Thin sugar over `VectorStore` that auto-fills `VectorSpaceDescriptor` from the active embedding. TZ §8.2, §10. */
+  /** The active embedding's `VectorSpaceDescriptor` — throws if no manifest/embedding is known yet. */
+  private activeVectorSpace(): VectorSpaceDescriptor {
+    if (!this.currentManifest) {
+      throw new RuntimeInitError('no manifest loaded yet — call refreshManifest()/ensureEmbeddingReady() first');
+    }
+    const embedding = this.currentManifest.embedding;
+    return { embeddingId: embedding.id, embeddingVersion: embedding.version, dimensions: embedding.dimensions };
+  }
+
+  private get vectorStoreOrThrow(): VectorStore {
+    if (!this.vectorStore) throw new RuntimeInitError('vector store not initialized — this should never happen after create()');
+    return this.vectorStore;
+  }
+
+  /**
+   * Thin sugar over `VectorStore` that auto-fills `VectorSpaceDescriptor`
+   * from the active embedding (TZ §8.2, §10) — ordinary code never has to
+   * pass one by hand. `ensureSchema()` runs before every write/read, which
+   * doubles as the space-mismatch guard TZ §8.2/§8.3 requires "on every
+   * upsert/search": a manifest embedding change without an explicit
+   * `reindex()` surfaces as `VectorSpaceMismatchError` here, not a silently
+   * wrong search result.
+   */
   readonly vectors = {
-    upsert: async (_entry: VectorEntry): Promise<void> => {
-      throw new Error(NOT_IMPLEMENTED);
+    upsert: async (entry: VectorEntry): Promise<void> => {
+      const space = this.activeVectorSpace();
+      await this.vectorStoreOrThrow.ensureSchema(space);
+      await this.vectorStoreOrThrow.upsert(entry, space);
     },
-    search: async (_queryEmbedding: Float32Array, _options?: { topK?: number; filter?: Record<string, unknown> }): Promise<VectorSearchHit[]> => {
-      throw new Error(NOT_IMPLEMENTED);
+    search: async (queryEmbedding: Float32Array, options?: { topK?: number; filter?: Record<string, unknown> }): Promise<VectorSearchHit[]> => {
+      const space = this.activeVectorSpace();
+      await this.vectorStoreOrThrow.ensureSchema(space);
+      return this.vectorStoreOrThrow.search(queryEmbedding, space, options);
     },
+    /** Wipes stored vectors and adopts the active embedding as the new space — the only sanctioned way past a space mismatch (TZ §8.2). */
     reindex: async (): Promise<void> => {
-      throw new Error(NOT_IMPLEMENTED);
+      await this.vectorStoreOrThrow.reindex(this.activeVectorSpace());
     },
-    count: async (): Promise<number> => {
-      throw new Error(NOT_IMPLEMENTED);
-    },
+    count: async (): Promise<number> => this.vectorStoreOrThrow.count(),
   };
 
   readonly downloads = {

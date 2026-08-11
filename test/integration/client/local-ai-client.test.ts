@@ -417,6 +417,31 @@ describe('LocalAiClient', () => {
     expect(await client.getMessages('host-chat-1')).toHaveLength(1);
   });
 
+  // --- client.vectors.* — TZ §8.2/§8.3/§10 ---
+
+  it('vectors.upsert()/search() auto-fill the VectorSpaceDescriptor from the active embedding', async () => {
+    const client = await LocalAiClient.create({ manifestUrl, ports });
+    await client.refreshManifest(); // embedding.dimensions = 4 in the shared manifestBody() fixture
+
+    await client.vectors.upsert({ id: 'a', embedding: new Float32Array([1, 0, 0, 0]), text: 'alpha' });
+    await client.vectors.upsert({ id: 'b', embedding: new Float32Array([0, 1, 0, 0]), text: 'beta' });
+    expect(await client.vectors.count()).toBe(2);
+
+    const hits = await client.vectors.search(new Float32Array([1, 0, 0, 0]), { topK: 1 });
+    expect(hits[0]?.id).toBe('a');
+  });
+
+  it('vectors.reindex() wipes stored vectors and unblocks further writes', async () => {
+    const client = await LocalAiClient.create({ manifestUrl, ports });
+    await client.refreshManifest();
+    await client.vectors.upsert({ id: 'a', embedding: new Float32Array([1, 0, 0, 0]) });
+
+    await client.vectors.reindex();
+
+    expect(await client.vectors.count()).toBe(0);
+    await expect(client.vectors.upsert({ id: 'a', embedding: new Float32Array([1, 0, 0, 0]) })).resolves.toBeUndefined();
+  });
+
   // --- releaseRuntime() / reload() / destroy() / autoUnloadOnBackground — TZ §11 ---
 
   it('releaseRuntime() releases both contexts, keeps chats/files, and is idempotent', async () => {
