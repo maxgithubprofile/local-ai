@@ -21,6 +21,8 @@ import {
   PlatformNotSupportedError,
   RuntimeInitError,
 } from '../errors.js';
+import { createMessageSearchIndex } from '../db/create-message-search-index.js';
+import type { MessageSearchIndex } from '../db/message-search-index.js';
 import type { DownloadProgress, DownloadHandle } from '../download/download-state.js';
 import type {
   CompletionInput,
@@ -32,7 +34,16 @@ import type {
   LocalAiEventMap,
   Unsubscribe,
 } from '../types.js';
-import type { Chat, ChatMessage, ConversationApi, ConversationSyncApi } from '../conversations/conversation.types.js';
+import type {
+  Chat,
+  ChatExport,
+  ChatExportApi,
+  ChatMessage,
+  ChatSearchApi,
+  ChatSearchHit,
+  ConversationApi,
+  ConversationSyncApi,
+} from '../conversations/conversation.types.js';
 import type { VectorEntry, VectorSearchHit, VectorSpaceDescriptor, VectorStore } from '../db/vector-store.js';
 import { createVectorStore } from '../db/create-vector-store.js';
 import type { LocalAiManifest } from '../manifest/manifest.schema.js';
@@ -55,6 +66,8 @@ export interface LocalAiConfig {
   /** See TZ §9.7. Default `'truncate-oldest'` — open product question, TZ §16.17. */
   contextStrategy?: ContextStrategy;
   maxContextTokens?: number;
+  /** Number of chats' session files `SessionCache` keeps on disk (LRU-evicted) — Phase 8, default `3`. See `docs/decisions.md` #8. */
+  sessionCacheSlots?: number;
   ports?: Partial<LocalAiPorts>;
   logger?: LocalAiLogger;
 }
@@ -102,11 +115,12 @@ function rejectedCompletionStream<T>(error: Error): CompletionStream<T> {
 }
 
 /** Single public entry point — TZ §10. */
-export class LocalAiClient implements ConversationApi, ConversationSyncApi {
+export class LocalAiClient implements ConversationApi, ConversationSyncApi, ChatSearchApi, ChatExportApi {
   private currentManifest: LocalAiManifest | null = null;
   private modelLoaded = false;
   private embeddingLoaded = false;
   private vectorStore: VectorStore | null = null;
+  private messageSearchIndex: MessageSearchIndex | null = null;
   private readonly listeners = new Map<keyof LocalAiEventMap, Set<(payload: never) => void>>();
 
   private constructor(
@@ -135,7 +149,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
     const supportChecker = new SupportChecker(ports.platformSupport);
     const eligibilityService = new EligibilityService(ports.deviceInfo, ports.sqlite, ports.clock);
     const conversationStore = new ConversationStore(ports.sqlite, ports.clock);
-    const sessionCache = new SessionCache(ports.llmRuntime, ports.fileSystem);
+    const sessionCache = new SessionCache(ports.llmRuntime, ports.fileSystem, { maxSlots: config.sessionCacheSlots });
     const modelRegistry = new ModelRegistry(ports.sqlite, ports.clock);
     const runtimeFacade = new RuntimeFacade(ports.llmRuntime);
     const downloadEngine = new DownloadEngine(ports.downloadTransport, ports.fileSystem, ports.hash, ports.sqlite, ports.clock);
@@ -163,6 +177,13 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
     client.vectorStore = store;
     if (usedFallback) {
       client.emit('vector-store:fallback-active', { reason: 'sqlite-vec unavailable or failed its self-test on this device' });
+    }
+
+    // Phase 8 — same opportunistic pattern as the vector store above.
+    const { index, usedFallback: usedSearchFallback } = await createMessageSearchIndex(ports.sqlite);
+    client.messageSearchIndex = index;
+    if (usedSearchFallback) {
+      client.emit('chat-search:fallback-active', { reason: 'FTS5 unavailable or failed its self-test on this device' });
     }
 
     // TZ §11.2 — opt-in only, default false; never an eager reload on refocus.
@@ -673,6 +694,44 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
       this.emit('chat:message-appended', { chatId, messageId: m.id, role: m.role });
     }
     return result;
+  }
+
+  /** Syncs an edit to an already-stored message's content/status/metadata — Mode B (Phase 8, `docs/decisions.md` #7a). Invalidates the chat's session-cache file (its KV state was built from the old content). @throws {MessageNotFoundError} If `(chatId, messageId)` doesn't exist. */
+  async updateMessage(
+    chatId: string,
+    messageId: string,
+    updates: { content?: string; status?: ChatMessage['status']; tokenCount?: number; metadata?: Record<string, unknown> },
+  ): Promise<ChatMessage> {
+    const updated = await this.conversationStore.updateMessage(chatId, messageId, updates);
+    await this.sessionCache.deleteForChat(chatId);
+    return updated;
+  }
+
+  /** Syncs deletions made in the host app's own DB — Mode B (Phase 8, `docs/decisions.md` #7a). Unknown ids are silently not counted. Invalidates the chat's session-cache file only if something was actually deleted. */
+  async deleteMessages(chatId: string, messageIds: string[]): Promise<{ deleted: number }> {
+    const result = await this.conversationStore.deleteMessages(chatId, messageIds);
+    if (result.deleted > 0) {
+      await this.sessionCache.deleteForChat(chatId);
+    }
+    return result;
+  }
+
+  // --- ChatSearchApi / ChatExportApi (Phase 8, no TZ section — see docs/decisions.md) ---
+
+  /** Full-text search across one or all chats (TZ §9.5's "can build FTS5 if needed" note, Phase 8). Backed by real FTS5 when available, a `LIKE` scan otherwise — see `chat-search:fallback-active`. */
+  async searchMessages(query: string, options?: { chatId?: string; limit?: number }): Promise<ChatSearchHit[]> {
+    if (!this.messageSearchIndex) throw new RuntimeInitError('search index not initialized — this should never happen after create()');
+    return this.messageSearchIndex.search(query, options);
+  }
+
+  /** Exports one chat's full state, shaped to feed straight back into `upsertChat()`/`appendMessages()` for a round-trip restore (Phase 8). Resolves `null` if the chat doesn't exist. */
+  async exportChat(chatId: string): Promise<ChatExport | null> {
+    return this.conversationStore.exportChat(chatId);
+  }
+
+  /** Exports every chat, paginated the same way as `listChats()` (Phase 8). */
+  async exportChats(options?: { limit?: number; offset?: number }): Promise<ChatExport[]> {
+    return this.conversationStore.exportChats(options);
   }
 
   /** The active embedding's `VectorSpaceDescriptor` — throws if no manifest/embedding is known yet. */

@@ -111,6 +111,14 @@ export class ContextWindowExceededError extends LocalAiError {
   }
 }
 
+/** `ConversationSyncApi.updateMessage()` was called with a `(chatId, messageId)` that doesn't exist — Phase 8, `docs/decisions.md` #7a. */
+export class MessageNotFoundError extends LocalAiError {
+  /** @param message Human-readable detail — names the `chatId`/`messageId` that wasn't found. @param options Standard `ErrorOptions`. */
+  constructor(message: string, options?: ErrorOptions) {
+    super('message_not_found', message, options);
+  }
+}
+
 /**
  * `LocalAiConfig` is missing something `LocalAiClient.create()` needs to
  * proceed — most commonly an incomplete `ports` object. `core/**` cannot

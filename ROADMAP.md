@@ -395,5 +395,57 @@ Phase 7.3's note for two real bugs that check caught.
 ## Phase 8 — Post-v1 (TZ §15 row 8, explicitly out of scope until requested)
 
 Message branching (`parentMessageId`), multi-slot LRU session-cache, full-text search across chats
-(FTS5), export/backup, `updateMessage`/`deleteMessages`. Do not start any of these without an
-explicit new task — they're listed here only so they aren't silently reinvented mid-Phase-1-7.
+(FTS5), export/backup, `updateMessage`/`deleteMessages`. Was listed here only so it wasn't silently
+reinvented mid-Phase-1-7 — TZ §15 row 8 explicitly says this needs "an ТЗ по запросу" (separate spec
+on request), not the same design-review-level treatment as Phases 1-7. **2026-08-11: requested.**
+User was asked to scope which of the 5 post-v1 items to include (`AskUserQuestion`, since bundling
+all 5 in one shot would mean guessing several real product decisions at once — see CLAUDE.md's "ask
+before guessing" rule); chose 3 of 5, explicitly excluding message branching (schema + `sendMessage()`
+semantics change, the most invasive) — see `docs/decisions.md`'s Phase 8 section for the reasoning
+behind each decision below.
+
+- [x] **8.1 Multi-slot LRU `SessionCache`** (`docs/decisions.md` #8) — `SessionCache` now takes
+  `{ maxSlots }` (new `LocalAiConfig.sessionCacheSlots`, default 3), evicting the least-recently-used
+  `(chatId, modelFingerprint)` session file once the count is exceeded, replacing v1's actual behavior
+  (no eviction at all — every saved file persisted unboundedly). **Done 2026-08-11**, 4 new unit tests
+  (slot-count default, eviction past the cap, recency-bump-saves-from-eviction) plus a
+  `LocalAiClient` integration test wiring `sessionCacheSlots` end to end through real `sendMessage()`
+  calls.
+- [x] **8.2 `updateMessage`/`deleteMessages`** (`ConversationSyncApi`, `docs/decisions.md` #7a) — Mode B
+  sync of edits/deletes from the host app's own DB. `updateMessage()` partial-updates
+  content/status/tokenCount/metadata and throws `MessageNotFoundError` on an unknown `(chatId,
+  messageId)`; `deleteMessages()` bulk-deletes by id list, forgiving of already-missing ids (matches
+  `appendMessages`' idempotent-batch spirit). Both invalidate the affected chat's session-cache file via
+  the existing `SessionCache.deleteForChat()`. **Done 2026-08-11** — `ConversationStore` methods +
+  9 contract-test scenarios (parametrized the same way as the rest of `conversation-store.contract.ts`)
+  + 3 `LocalAiClient` integration tests.
+- [x] **8.3 Full-text search (`searchMessages`)** — new `ChatSearchApi`, backed by
+  `createMessageSearchIndex()` picking between `Fts5MessageSearchIndex` (primary, real SQLite FTS5,
+  external-content virtual table + triggers so `sendMessage`/`appendMessages`/`updateMessage`/
+  `deleteMessages`/`deleteChat` all stay in sync automatically) and `LikeMessageSearchIndex` (fallback,
+  `LIKE '%...%'`) — same opportunistic-primary/self-tested/silent-fallback shape as `VectorStore`'s
+  `sqlite-vec`/brute-force split (`create-vector-store.ts`), reused deliberately. New
+  `chat-search:fallback-active` event mirrors `vector-store:fallback-active`. **Done 2026-08-11,
+  fallback path verified, primary path not** — confirmed by direct test in this environment that
+  `node:sqlite`'s `DatabaseSync` doesn't have FTS5 compiled in (`no such module: fts5`), so — exactly
+  mirroring ADR 0002's sqlite-vec situation — only `LikeMessageSearchIndex` runs in this repo's own
+  tests (5 contract-test scenarios + 3 unit tests for the fallback-selection logic);
+  `Fts5MessageSearchIndex` needs a real device/Capacitor-SQLite build before being treated as verified,
+  same residual-risk pattern as every other opportunistic-SQL-extension path in this codebase.
+- [x] **8.4 Export/backup (`exportChat`/`exportChats`)** — new `ChatExportApi`. Deliberately no
+  separate import method — the exported `{ chat, messages }` shape feeds directly into
+  `upsertChat()`/`appendMessages()` for a round-trip restore, both already idempotent
+  (`docs/decisions.md`'s "Export/backup" entry explains why a bespoke import path would just duplicate
+  that). **Done 2026-08-11**, 5 contract-test scenarios including an actual round-trip through a second
+  `ConversationStore`, plus a `LocalAiClient` integration test round-tripping through a second client/DB.
+- [ ] **8.5 Message branching (`parentMessageId`)** — explicitly deferred, not started (see above).
+
+**Phase 8 exit criterion (informal, no TZ §15 wording — this phase has no design-review-level spec):**
+`pnpm lint`/`typecheck`/`test:unit`/`test:integration`/`test:contract` green, `pnpm run build`/`pnpm
+run docs` green. **Status: met for 8.1-8.4** — 189 total tests green (102 unit + 40 integration + 47
+contract, up from Phase 7's 162), `pnpm run build` and `pnpm run docs` both still clean (0 lint errors,
+same pre-existing TypeDoc warning count as before — no new ones). 8.3's FTS5 primary path carries the
+same "not exercised in this environment" caveat every sqlite-vec/Capacitor-adapter claim in this
+ROADMAP already carries — re-run `test/contract/message-search-index.contract.ts` against a real
+`Fts5MessageSearchIndex` on-device (or any Node build with `node:sqlite`'s FTS5 module compiled in)
+before treating it as verified.

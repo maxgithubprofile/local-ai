@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { ConversationStore } from '../../src/core/conversations/conversation-store.js';
+import { MessageNotFoundError } from '../../src/core/errors.js';
 import type { SqlitePort } from '../../src/core/ports/sqlite.port.js';
 import type { ClockPort } from '../../src/core/ports/clock.port.js';
 
@@ -189,6 +190,107 @@ export function defineConversationStoreContract(create: () => Promise<{ sqlite: 
       const second = await store.appendMessages(chat.id, batch2);
       expect(second).toEqual({ inserted: 1, skippedExisting: 2 });
       expect(await store.getMessages(chat.id)).toHaveLength(3);
+    });
+
+    // --- updateMessage / deleteMessages (Phase 8, docs/decisions.md #7a) ---
+
+    it('updateMessage() changes only the given fields, leaving the rest untouched', async () => {
+      const chat = await store.createChat();
+      await store.addMessage(chat.id, {
+        id: 'm1',
+        role: 'assistant',
+        content: 'original',
+        status: 'complete',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        tokenCount: 5,
+      });
+
+      const updated = await store.updateMessage(chat.id, 'm1', { content: 'edited' });
+
+      expect(updated.content).toBe('edited');
+      expect(updated.status).toBe('complete'); // untouched
+      expect(updated.tokenCount).toBe(5); // untouched
+      const [stored] = await store.getMessages(chat.id);
+      expect(stored?.content).toBe('edited');
+    });
+
+    it('updateMessage() bumps the parent chat.updatedAt', async () => {
+      const chat = await store.createChat({ id: 'c1' });
+      await store.addMessage(chat.id, { id: 'm1', role: 'user', content: 'hi', createdAt: '2026-01-01T00:00:00.000Z' });
+      clock.advance?.(5000);
+
+      await store.updateMessage(chat.id, 'm1', { content: 'edited' });
+
+      expect((await store.getChat('c1'))?.updatedAt).toBe('2026-01-01T00:00:05.000Z');
+    });
+
+    it('updateMessage() throws MessageNotFoundError for an unknown (chatId, messageId)', async () => {
+      const chat = await store.createChat();
+      await expect(store.updateMessage(chat.id, 'does-not-exist', { content: 'x' })).rejects.toThrow(
+        MessageNotFoundError,
+      );
+    });
+
+    it('deleteMessages() removes the given ids and reports how many were actually deleted', async () => {
+      const chat = await store.createChat();
+      await store.appendMessages(chat.id, [
+        { id: 'm1', role: 'user', content: 'one', createdAt: '2026-01-01T00:00:00.000Z' },
+        { id: 'm2', role: 'assistant', content: 'two', createdAt: '2026-01-01T00:00:01.000Z' },
+      ]);
+
+      const result = await store.deleteMessages(chat.id, ['m1', 'does-not-exist']);
+
+      expect(result).toEqual({ deleted: 1 });
+      expect((await store.getMessages(chat.id)).map((m) => m.id)).toEqual(['m2']);
+    });
+
+    it('deleteMessages() with an empty id list is a no-op', async () => {
+      const chat = await store.createChat();
+      await store.addMessage(chat.id, { id: 'm1', role: 'user', content: 'hi', createdAt: '2026-01-01T00:00:00.000Z' });
+
+      expect(await store.deleteMessages(chat.id, [])).toEqual({ deleted: 0 });
+      expect(await store.getMessages(chat.id)).toHaveLength(1);
+    });
+
+    // --- exportChat / exportChats (Phase 8) ---
+
+    it('exportChat() returns the chat plus its full message history', async () => {
+      const chat = await store.createChat({ id: 'c1', title: 'Trip' });
+      await store.appendMessages(chat.id, [
+        { id: 'm1', role: 'user', content: 'hi', createdAt: '2026-01-01T00:00:00.000Z' },
+      ]);
+
+      const exported = await store.exportChat('c1');
+
+      expect(exported?.chat).toEqual(await store.getChat('c1'));
+      expect(exported?.messages).toHaveLength(1);
+    });
+
+    it('exportChat() resolves null for an unknown chat', async () => {
+      expect(await store.exportChat('does-not-exist')).toBeNull();
+    });
+
+    it('exportChat() output round-trips through upsertChat()/appendMessages() into a fresh store', async () => {
+      const chat = await store.createChat({ id: 'c1', title: 'Trip' });
+      await store.appendMessages(chat.id, [
+        { id: 'm1', role: 'user', content: 'hi', createdAt: '2026-01-01T00:00:00.000Z' },
+      ]);
+      const exported = await store.exportChat('c1');
+
+      const restored = new ConversationStore(sqlite, clock);
+      await restored.upsertChat(exported!.chat);
+      await restored.appendMessages(exported!.chat.id, exported!.messages);
+
+      expect(await restored.getMessages('c1')).toHaveLength(1);
+    });
+
+    it('exportChats() exports every chat', async () => {
+      await store.createChat({ id: 'a' });
+      await store.createChat({ id: 'b' });
+
+      const exported = await store.exportChats();
+
+      expect(exported.map((e) => e.chat.id).sort()).toEqual(['a', 'b']);
     });
   });
 }

@@ -82,6 +82,44 @@ describe('SessionCache', () => {
     expect((await fresh.activate('chat-1', 'model-v1')).loadedFromCache).toBe(false);
   });
 
+  it('exposes the configured slot count, defaulting to 3', async () => {
+    expect(cache.slotCount).toBe(3);
+    const custom = new SessionCache(runtime, fileSystem, { maxSlots: 5 });
+    expect(custom.slotCount).toBe(5);
+  });
+
+  it('evicts the least-recently-used session file once maxSlots is exceeded (Phase 8 LRU)', async () => {
+    const lru = new SessionCache(runtime, fileSystem, { maxSlots: 2 });
+
+    await lru.activate('chat-1', 'model-v1');
+    await lru.save('chat-1', 'model-v1');
+    await lru.activate('chat-2', 'model-v1');
+    await lru.save('chat-2', 'model-v1');
+    await lru.activate('chat-3', 'model-v1'); // pushes the LRU set to 3 slots -> evicts chat-1 (oldest)
+    await lru.save('chat-3', 'model-v1');
+
+    expect(await fileSystem.exists(fileSystem.resolvePath('sessions', 'session-chat-1-model-v1.bin'))).toBe(false);
+    expect(await fileSystem.exists(fileSystem.resolvePath('sessions', 'session-chat-2-model-v1.bin'))).toBe(true);
+    expect(await fileSystem.exists(fileSystem.resolvePath('sessions', 'session-chat-3-model-v1.bin'))).toBe(true);
+  });
+
+  it('re-activating a chat bumps it to most-recently-used, saving it from eviction', async () => {
+    const lru = new SessionCache(runtime, fileSystem, { maxSlots: 2 });
+
+    await lru.activate('chat-1', 'model-v1');
+    await lru.save('chat-1', 'model-v1');
+    await lru.activate('chat-2', 'model-v1');
+    await lru.save('chat-2', 'model-v1'); // slots: [chat-1, chat-2], both under the cap
+
+    await lru.activate('chat-1', 'model-v1'); // re-load chat-1 -> bumps it to most-recent: [chat-2, chat-1]
+    await lru.activate('chat-3', 'model-v1');
+    await lru.save('chat-3', 'model-v1'); // pushes to 3 slots -> evicts the now-oldest, chat-2
+
+    expect(await fileSystem.exists(fileSystem.resolvePath('sessions', 'session-chat-1-model-v1.bin'))).toBe(true);
+    expect(await fileSystem.exists(fileSystem.resolvePath('sessions', 'session-chat-2-model-v1.bin'))).toBe(false);
+    expect(await fileSystem.exists(fileSystem.resolvePath('sessions', 'session-chat-3-model-v1.bin'))).toBe(true);
+  });
+
   it('deleteForChat() removes only that chat\'s session file(s)', async () => {
     await cache.activate('chat-1', 'model-v1');
     await cache.save('chat-1', 'model-v1');

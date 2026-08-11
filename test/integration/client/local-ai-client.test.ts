@@ -15,7 +15,7 @@ import { NodeSqliteAdapter } from '../../../src/adapters/node-testing/node-sqlit
 import { NodeRangeDownloadAdapter } from '../../../src/adapters/node-testing/node-range-download.adapter.js';
 import { WebCryptoHashAdapter } from '../../../src/adapters/shared/web-crypto-hash.adapter.js';
 import { createMockDownloadServer } from '../download/mock-http-server.js';
-import { ConfigInvalidError, DeviceNotEligibleError, RuntimeInitError } from '../../../src/core/errors.js';
+import { ConfigInvalidError, DeviceNotEligibleError, MessageNotFoundError, RuntimeInitError } from '../../../src/core/errors.js';
 import type { DeviceSnapshot } from '../../../src/core/support/types.js';
 
 const realFetch = globalThis.fetch;
@@ -415,6 +415,118 @@ describe('LocalAiClient', () => {
 
     expect(result).toEqual({ inserted: 1, skippedExisting: 0 });
     expect(await client.getMessages('host-chat-1')).toHaveLength(1);
+  });
+
+  // --- updateMessage() / deleteMessages() (Mode B, Phase 8, docs/decisions.md #7a) ---
+
+  it('updateMessage() edits content and invalidates that chat\'s session-cache file only', async () => {
+    const client = await LocalAiClient.create({ manifestUrl, ports });
+    await client.refreshManifest();
+    await client.ensureModelReady();
+    const chatA = await client.createChat();
+    const chatB = await client.createChat();
+
+    llmRuntime.scriptedTokens = ['ok'];
+    await client.sendMessage(chatA.id, 'first').result;
+    await client.sendMessage(chatB.id, 'first').result;
+    const sessionA = path.join(tmpDir, 'sessions', `session-${chatA.id}-qwen-4b:1.bin`);
+    const sessionB = path.join(tmpDir, 'sessions', `session-${chatB.id}-qwen-4b:1.bin`);
+    expect(fs.existsSync(sessionA)).toBe(true);
+    expect(fs.existsSync(sessionB)).toBe(true);
+
+    const [userMessage] = await client.getMessages(chatA.id);
+    const updated = await client.updateMessage(chatA.id, userMessage!.id, { content: 'edited content' });
+
+    expect(updated.content).toBe('edited content');
+    expect(fs.existsSync(sessionA)).toBe(false); // invalidated
+    expect(fs.existsSync(sessionB)).toBe(true); // untouched
+  });
+
+  it('updateMessage() on an unknown message id throws MessageNotFoundError', async () => {
+    const client = await LocalAiClient.create({ manifestUrl, ports });
+    const chat = await client.createChat();
+    await expect(client.updateMessage(chat.id, 'does-not-exist', { content: 'x' })).rejects.toThrow(
+      MessageNotFoundError,
+    );
+  });
+
+  it('deleteMessages() removes the given ids and reports the count', async () => {
+    const client = await LocalAiClient.create({ manifestUrl, ports });
+    const chat = await client.createChat();
+    await client.appendMessages(chat.id, [
+      { id: 'm1', role: 'user', content: 'one', createdAt: '2026-01-01T00:00:00.000Z' },
+      { id: 'm2', role: 'assistant', content: 'two', createdAt: '2026-01-01T00:00:01.000Z' },
+    ]);
+
+    const result = await client.deleteMessages(chat.id, ['m1']);
+
+    expect(result).toEqual({ deleted: 1 });
+    expect((await client.getMessages(chat.id)).map((m) => m.id)).toEqual(['m2']);
+  });
+
+  // --- searchMessages() (Phase 8, no TZ section — docs/decisions.md) ---
+
+  it('searchMessages() finds a message by content across chats, and can be restricted to one chat', async () => {
+    const client = await LocalAiClient.create({ manifestUrl, ports });
+    const chatA = await client.createChat({ id: 'a' });
+    const chatB = await client.createChat({ id: 'b' });
+    await client.appendMessages(chatA.id, [
+      { id: 'm1', role: 'user', content: 'the treasure map is buried', createdAt: '2026-01-01T00:00:00.000Z' },
+    ]);
+    await client.appendMessages(chatB.id, [
+      { id: 'm2', role: 'user', content: 'completely unrelated', createdAt: '2026-01-01T00:00:00.000Z' },
+    ]);
+
+    const everywhere = await client.searchMessages('treasure map');
+    expect(everywhere.map((h) => h.message.id)).toEqual(['m1']);
+
+    const scoped = await client.searchMessages('treasure map', { chatId: 'b' });
+    expect(scoped).toEqual([]);
+  });
+
+  // --- exportChat() / exportChats() (Phase 8) ---
+
+  it('exportChat()/exportChats() round-trip through upsertChat()/appendMessages()', async () => {
+    const client = await LocalAiClient.create({ manifestUrl, ports });
+    const chat = await client.createChat({ id: 'c1', title: 'Trip' });
+    await client.appendMessages(chat.id, [
+      { id: 'm1', role: 'user', content: 'hi', createdAt: '2026-01-01T00:00:00.000Z' },
+    ]);
+
+    const exported = await client.exportChat('c1');
+    expect(exported?.messages).toHaveLength(1);
+
+    const all = await client.exportChats();
+    expect(all.map((e) => e.chat.id)).toContain('c1');
+
+    // Round-trip into a second, independent client/db.
+    const otherDb = new NodeSqliteAdapter(':memory:');
+    const otherClient = await LocalAiClient.create({ manifestUrl, ports: { ...ports, sqlite: otherDb } });
+    await otherClient.upsertChat(exported!.chat);
+    await otherClient.appendMessages(exported!.chat.id, exported!.messages);
+    expect(await otherClient.getMessages('c1')).toHaveLength(1);
+  });
+
+  it('exportChat() resolves null for an unknown chat', async () => {
+    const client = await LocalAiClient.create({ manifestUrl, ports });
+    expect(await client.exportChat('does-not-exist')).toBeNull();
+  });
+
+  // --- sessionCacheSlots (Phase 8 multi-slot LRU, docs/decisions.md #8) ---
+
+  it('sessionCacheSlots bounds how many chats keep a session file, evicting the least-recently-used', async () => {
+    const client = await LocalAiClient.create({ manifestUrl, ports, sessionCacheSlots: 1 });
+    await client.refreshManifest();
+    await client.ensureModelReady();
+    const chatA = await client.createChat();
+    const chatB = await client.createChat();
+
+    llmRuntime.scriptedTokens = ['ok'];
+    await client.sendMessage(chatA.id, 'first').result;
+    await client.sendMessage(chatB.id, 'second').result; // maxSlots: 1 -> evicts chat A's session file
+
+    expect(fs.existsSync(path.join(tmpDir, 'sessions', `session-${chatA.id}-qwen-4b:1.bin`))).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, 'sessions', `session-${chatB.id}-qwen-4b:1.bin`))).toBe(true);
   });
 
   // --- client.vectors.* — TZ §8.2/§8.3/§10 ---

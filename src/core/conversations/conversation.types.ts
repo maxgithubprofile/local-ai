@@ -111,4 +111,69 @@ export interface ConversationSyncApi {
       metadata?: Record<string, unknown>;
     }>,
   ): Promise<{ inserted: number; skippedExisting: number }>;
+
+  /**
+   * Syncs an edit made to an already-stored message's content in the host
+   * app's own DB (Phase 8, `docs/decisions.md` #7a) — content is otherwise
+   * immutable after first write (TZ §9.5). Only the fields given in
+   * `updates` are changed; omitted fields are left as-is. Invalidates the
+   * chat's session-cache file (its KV state was built from the old
+   * content). Throws {@link MessageNotFoundError} if `(chatId, messageId)`
+   * doesn't exist — an explicit sync call naming a specific message that
+   * turns out to be missing signals real drift between the host app's DB
+   * and `local-ai`'s copy, unlike `appendMessages`' routine dedup-by-id.
+   */
+  updateMessage(
+    chatId: string,
+    messageId: string,
+    updates: { content?: string; status?: ChatMessage['status']; tokenCount?: number; metadata?: Record<string, unknown> },
+  ): Promise<ChatMessage>;
+
+  /**
+   * Syncs deletions made in the host app's own DB (Phase 8, `docs/decisions.md`
+   * #7a). Unlike {@link updateMessage}, ids that don't exist are silently
+   * not counted — a bulk delete-sync call is expected to sometimes name ids
+   * already gone (e.g. a repeated/overlapping sync batch), matching
+   * `appendMessages`' idempotent-batch spirit. Invalidates the chat's
+   * session-cache file if anything was actually deleted.
+   */
+  deleteMessages(chatId: string, messageIds: string[]): Promise<{ deleted: number }>;
+}
+
+/**
+ * One chat's full exportable state — Phase 8 (`docs/decisions.md`'s "Full-text
+ * search"/"Export/backup" section). Deliberately shaped to feed straight
+ * back into {@link ConversationSyncApi.upsertChat}/`appendMessages` for a
+ * round-trip restore — no separate import method exists on purpose.
+ */
+export interface ChatExport {
+  chat: Chat;
+  messages: ChatMessage[];
+}
+
+/** Export/backup — Phase 8 addition, no TZ section (see `docs/decisions.md`). Implemented by `LocalAiClient`, backed by `ConversationStore`. */
+export interface ChatExportApi {
+  /** Resolves `null` if no chat with this id exists. */
+  exportChat(chatId: string): Promise<ChatExport | null>;
+  /** Exports every chat (paginated the same way as `listChats()`). */
+  exportChats(options?: { limit?: number; offset?: number }): Promise<ChatExport[]>;
+}
+
+/** One full-text search hit — Phase 8 addition, no TZ section (see `docs/decisions.md`). */
+export interface ChatSearchHit {
+  message: ChatMessage;
+  /** Highlighted excerpt around the match — only populated on the FTS5 path, `undefined` on the `LIKE` fallback. */
+  snippet?: string;
+}
+
+/**
+ * Full-text search across one or all chats — Phase 8 addition, no TZ
+ * section (see `docs/decisions.md`'s "Full-text search" entry).
+ * Implemented by `LocalAiClient`, backed by `MessageSearchIndex`
+ * (`createMessageSearchIndex()` picks FTS5 or a `LIKE` fallback
+ * opportunistically, same shape as `VectorStore`'s `sqlite-vec`/brute-force
+ * split).
+ */
+export interface ChatSearchApi {
+  searchMessages(query: string, options?: { chatId?: string; limit?: number }): Promise<ChatSearchHit[]>;
 }

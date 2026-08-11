@@ -63,6 +63,8 @@ export interface LocalAiEventMap {
   'runtime:embedding-loaded': { embeddingId: string; version: number };
   'runtime:unloaded': { reason: 'manual' | 'background' | 'model-switch' | 'embedding-switch' };
   'vector-store:fallback-active': { reason: string };
+  /** Phase 8 — `createMessageSearchIndex()` fell back to `LikeMessageSearchIndex` (FTS5 unavailable/failed its self-test on this device). See `docs/decisions.md`'s "Full-text search" entry. */
+  'chat-search:fallback-active': { reason: string };
   'vector-store:embedding-changed': {
     previous?: { id: string; version: number; dimensions: number };
     current: { id: string; version: number; dimensions: number };

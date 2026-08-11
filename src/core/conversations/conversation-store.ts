@@ -1,6 +1,8 @@
 import type { SqlitePort, SqliteRow } from '../ports/sqlite.port.js';
 import type { ClockPort } from '../ports/clock.port.js';
-import type { Chat, ChatMessage } from './conversation.types.js';
+import type { Chat, ChatExport, ChatMessage } from './conversation.types.js';
+import { MessageNotFoundError } from '../errors.js';
+import { type ChatMessageRow, rowToMessage } from './chat-message-row.js';
 
 interface ChatRow extends SqliteRow {
   id: string;
@@ -10,36 +12,12 @@ interface ChatRow extends SqliteRow {
   metadata: string | null;
 }
 
-interface ChatMessageRow extends SqliteRow {
-  chat_id: string;
-  id: string;
-  role: ChatMessage['role'];
-  content: string;
-  status: ChatMessage['status'];
-  created_at: string;
-  token_count: number | null;
-  metadata: string | null;
-}
-
 function rowToChat(row: ChatRow): Chat {
   return {
     id: row.id,
     title: row.title,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    metadata: row.metadata ? (JSON.parse(row.metadata) as Record<string, unknown>) : undefined,
-  };
-}
-
-function rowToMessage(row: ChatMessageRow): ChatMessage {
-  return {
-    id: row.id,
-    chatId: row.chat_id,
-    role: row.role,
-    content: row.content,
-    status: row.status,
-    createdAt: row.created_at,
-    tokenCount: row.token_count ?? undefined,
     metadata: row.metadata ? (JSON.parse(row.metadata) as Record<string, unknown>) : undefined,
   };
 }
@@ -260,5 +238,78 @@ export class ConversationStore {
       else skippedExisting += 1;
     }
     return { inserted, skippedExisting };
+  }
+
+  /**
+   * Phase 8, `docs/decisions.md` #7a — partial update of an already-stored
+   * message; only fields present in `updates` are changed. Throws
+   * {@link MessageNotFoundError} if `(chatId, messageId)` doesn't exist.
+   * Session-cache invalidation is the caller's job (`LocalAiClient`, which
+   * owns `SessionCache`) — this class only owns the SQL side, same
+   * division as `deleteChat()`.
+   */
+  async updateMessage(
+    chatId: string,
+    messageId: string,
+    updates: { content?: string; status?: ChatMessage['status']; tokenCount?: number; metadata?: Record<string, unknown> },
+  ): Promise<ChatMessage> {
+    const rows = await this.sqlite.query<ChatMessageRow>('SELECT * FROM chat_messages WHERE chat_id = ? AND id = ?', [
+      chatId,
+      messageId,
+    ]);
+    const existing = rows[0];
+    if (!existing) {
+      throw new MessageNotFoundError(`no message '${messageId}' in chat '${chatId}'`);
+    }
+
+    const content = updates.content ?? existing.content;
+    const status = updates.status ?? existing.status;
+    const tokenCount = updates.tokenCount ?? existing.token_count ?? undefined;
+    const metadata = updates.metadata !== undefined ? updates.metadata : (existing.metadata ? (JSON.parse(existing.metadata) as Record<string, unknown>) : undefined);
+
+    await this.sqlite.execute(
+      'UPDATE chat_messages SET content = ?, status = ?, token_count = ?, metadata = ? WHERE chat_id = ? AND id = ?',
+      [content, status, tokenCount ?? null, metadata ? JSON.stringify(metadata) : null, chatId, messageId],
+    );
+    await this.sqlite.execute('UPDATE chats SET updated_at = ? WHERE id = ?', [this.clock.nowIso(), chatId]);
+
+    return rowToMessage({ ...existing, content, status, token_count: tokenCount ?? null, metadata: metadata ? JSON.stringify(metadata) : null });
+  }
+
+  /**
+   * Phase 8, `docs/decisions.md` #7a — bulk delete-sync; unknown ids are
+   * silently not counted (idempotent-batch spirit, matching
+   * `appendMessages`). Empty `messageIds` short-circuits without a query.
+   */
+  async deleteMessages(chatId: string, messageIds: string[]): Promise<{ deleted: number }> {
+    if (messageIds.length === 0) return { deleted: 0 };
+    const placeholders = messageIds.map(() => '?').join(', ');
+    const rows = await this.sqlite.query<{ id: string }>(
+      `DELETE FROM chat_messages WHERE chat_id = ? AND id IN (${placeholders}) RETURNING id`,
+      [chatId, ...messageIds],
+    );
+    return { deleted: rows.length };
+  }
+
+  /**
+   * Phase 8 — exports one chat's full state, shaped to feed straight back
+   * into `upsertChat()`/`appendMessages()` for a round-trip restore (see
+   * `docs/decisions.md`'s "Export/backup" entry). Resolves `null` if the
+   * chat doesn't exist.
+   */
+  async exportChat(chatId: string): Promise<ChatExport | null> {
+    const chat = await this.getChat(chatId);
+    if (!chat) return null;
+    return { chat, messages: await this.getMessages(chatId) };
+  }
+
+  /** Phase 8 — exports every chat, paginated the same way as `listChats()`. */
+  async exportChats(options?: { limit?: number; offset?: number }): Promise<ChatExport[]> {
+    const chats = await this.listChats(options);
+    const exports: ChatExport[] = [];
+    for (const chat of chats) {
+      exports.push({ chat, messages: await this.getMessages(chat.id) });
+    }
+    return exports;
   }
 }

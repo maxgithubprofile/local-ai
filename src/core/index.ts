@@ -24,9 +24,20 @@ export { evaluateEligibility } from './support/eligibility-service.js';
 
 export type { DownloadState, DownloadProgress, DownloadHandle } from './download/download-state.js';
 
-export type { Chat, ChatMessage, ConversationApi, ConversationSyncApi } from './conversations/conversation.types.js';
+export type {
+  Chat,
+  ChatMessage,
+  ChatExport,
+  ChatExportApi,
+  ChatSearchApi,
+  ChatSearchHit,
+  ConversationApi,
+  ConversationSyncApi,
+} from './conversations/conversation.types.js';
+export { DEFAULT_SESSION_CACHE_SLOTS } from './conversations/session-cache.js';
 
 export type { VectorSpaceDescriptor, VectorEntry, VectorSearchHit, VectorStore } from './db/vector-store.js';
+export type { MessageSearchIndex } from './db/message-search-index.js';
 
 export type { LocalAiPorts } from './ports/index.js';
 export type {

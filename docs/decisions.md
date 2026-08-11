@@ -13,9 +13,9 @@ a decision.
 | 4 | Whether to actively support degraded Web/Electron at all | Open | — | — | — |
 | 5 | Whether `VectorStore`/`sqlite-vec` is mandatory for v1 | Open | — | — | — |
 | 6 | Chat/message count or size limits | Open | — | — | — |
-| 7 | Message branching (regenerate/edit-and-resubmit) in v1 | Open | — | — | — |
-| 7a | Syncing edits/deletes of individual messages from the host app's own DB (Mode B) | Open | — | — | — |
-| 8 | Multi-slot session-cache vs. single-slot for v1 | Open | Bootstrap follows TZ's stated v1 default: single-slot (§9.3) | — | — |
+| 7 | Message branching (regenerate/edit-and-resubmit) in v1 | Open | User scoped Phase 8's 2026-08-11 request to exclude this — most invasive of the Phase 8 set (schema + `getMessages()`/`sendMessage()` semantics change), stays deferred until asked for explicitly | 2026-08-11 | — |
+| 7a | Syncing edits/deletes of individual messages from the host app's own DB (Mode B) | Resolved | Implemented as `ConversationSyncApi.updateMessage()`/`deleteMessages()` (Phase 8). `updateMessage()` throws `MessageNotFoundError` if `(chatId, messageId)` doesn't exist (an explicit sync call on a known id going missing is a real drift bug, not something to swallow silently, unlike `appendMessages`' dedup-by-existing which is expected/routine). `deleteMessages()` is forgiving — unknown ids simply don't count towards `deleted`, since bulk delete-sync is expected to be called with possibly-stale id lists. Both invalidate the affected chat's session-cache file (content changed under it) via the same `SessionCache.deleteForChat()` used by `deleteChat()`. | 2026-08-11 | — |
+| 8 | Multi-slot session-cache vs. single-slot for v1 | Resolved | v1 shipped single-conceptual-slot (in-process hot pointer) but with **no eviction at all** — every chat's session file already persisted unboundedly once saved (see `session-cache.test.ts`'s pre-Phase-8 behavior). Phase 8 replaces that with a real bounded LRU: `SessionCache` takes `{ maxSlots }` (new `LocalAiConfig.sessionCacheSlots`, default **3** — smallest-reasonable-assumption product default, revisit if usage data suggests otherwise), evicting (deleting) the least-recently-touched `(chatId, modelFingerprint)` session file once the count exceeds it. LRU order is tracked in-process only — session files already on disk from an earlier process aren't retroactively ordered (no mtime on `FileSystemPort.stat()` to reconstruct recency), so a fresh process only starts evicting once it has itself touched `maxSlots + 1` distinct slots; pre-existing untouched files are harmless (sessions are derived/rebuildable, TZ §9.3) and get reclaimed by `deleteForChat()`/`invalidateAll()` regardless. | 2026-08-11 | — |
 | 9 | Retention policy for `previousModels[]`/`previousEmbeddings[]` | Open | — | — | — |
 | 10 | Local DB encryption (SQLCipher) | Open | — | — | — |
 | 11 | Monorepo vs. single package | Open | Bootstrap follows TZ's §3.1 recommendation: single package, subpath exports | — | — |
@@ -35,6 +35,20 @@ a decision.
    resolution came from a spike or has non-trivial consequences.
 3. If code already encodes the old placeholder assumption, update it in the same change — don't
    leave the ledger and the code disagreeing.
+
+## Phase 8 decisions (not TZ §16-numbered — TZ §9.5/§15 row 8 flagged these for "отдельное ТЗ по запросу" rather than giving them their own §16 numbers)
+
+User scoped the 2026-08-11 Phase 8 request to: multi-slot LRU session-cache (#8 above), `updateMessage`/`deleteMessages` (#7a above), and full-text search + export/backup (this section) — explicitly **excluding** message branching (#7, stays open).
+
+### Full-text search (`searchMessages`)
+
+**Decision:** primary path is real SQLite FTS5 (external-content virtual table `chat_messages_fts` over `chat_messages`, kept in sync via `AFTER INSERT/UPDATE/DELETE` triggers so `updateMessage`/`deleteMessages`/`deleteChat` all stay consistent automatically), with a `LIKE`-based brute-force fallback — same opportunistic-primary/self-tested/silent-fallback shape as `VectorStore`'s `sqlite-vec`/brute-force split (`create-vector-store.ts`), reusing that pattern deliberately rather than inventing a new one. New `chat-search:fallback-active` event mirrors `vector-store:fallback-active`.
+
+**Why not a numbered migration:** confirmed by direct test in this environment — `node:sqlite`'s `DatabaseSync` (Node 22.12.0, `--experimental-sqlite`) does **not** have FTS5 compiled in (`CREATE VIRTUAL TABLE ... USING fts5(...)` throws `no such module: fts5`). A migration that assumes FTS5 would break `Database.migrate()` — and therefore the entire library, not just search — on any environment lacking it. So, like `vec0`, the FTS5 table/triggers are created lazily and self-tested (`createMessageSearchIndex()`, mirrors `createVectorStore()`), never inside `MIGRATIONS`. This repo's own Node tests exercise only the `LIKE` fallback path, exactly mirroring `VectorStore`'s residual-risk pattern (ADR 0002) — the FTS5 path needs real-device/Capacitor-SQLite confirmation before being treated as verified.
+
+### Export/backup (`exportChat`/`exportChats`)
+
+**Decision:** deliberately **no separate import method**. `exportChat()`/`exportChats()` return `{ chat, messages }` shaped exactly as `upsertChat()`'s input + `appendMessages()`'s input — round-tripping a backup is `upsertChat(exported.chat)` + `appendMessages(exported.chatId, exported.messages)`, both already idempotent. Building a bespoke import path would duplicate logic `ConversationSyncApi` already provides for the identical shape. No file/DB-level raw backup (e.g. copying the SQLite file) — TZ never specifies one, JSON-shaped export is the smallest reasonable interpretation of "export/backup" that composes with what already exists, and it's the same reasoning as this row's "least specified" flag when the user was asked to scope Phase 8.
 
 ## Implementation/tooling notes (not TZ §16 questions)
 
