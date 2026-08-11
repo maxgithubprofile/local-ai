@@ -38,7 +38,7 @@ class NobleIncrementalHasher implements IncrementalHasher {
 
 /**
  * `HashPort` implementation shared by every platform (TZ §3.1/§7.4) — see
- * {@link NobleIncrementalHasher} for why `@noble/hashes` backs it.
+ * `NobleIncrementalHasher` above for why `@noble/hashes` backs it.
  */
 export class WebCryptoHashAdapter implements HashPort {
   sha256(data: Uint8Array): string {

@@ -7,6 +7,7 @@
 export class LocalAiError extends Error {
   readonly code: string;
 
+  /** @param code Stable machine-readable error code — never changes once shipped. @param message Human-readable detail. @param options Standard `ErrorOptions` (e.g. `cause`). */
   constructor(code: string, message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = new.target.name;
@@ -16,6 +17,7 @@ export class LocalAiError extends Error {
 
 /** TZ §6.1 — `checkSupport()` reports `capabilities.inference === false`. */
 export class PlatformNotSupportedError extends LocalAiError {
+  /** @param message Human-readable detail, typically `SupportReport.reasons` joined. @param options Standard `ErrorOptions`. */
   constructor(message: string, options?: ErrorOptions) {
     super('platform_not_supported', message, options);
   }
@@ -23,6 +25,7 @@ export class PlatformNotSupportedError extends LocalAiError {
 
 /** TZ §6.2/§6.4 — eligibility verdict is `'no'` and `eligibilityPolicy` is `'block'`. */
 export class DeviceNotEligibleError extends LocalAiError {
+  /** @param message Human-readable detail, typically `EligibilityReport.reasons` joined. @param options Standard `ErrorOptions`. */
   constructor(message: string, options?: ErrorOptions) {
     super('device_not_eligible', message, options);
   }
@@ -30,6 +33,7 @@ export class DeviceNotEligibleError extends LocalAiError {
 
 /** Manifest could not be fetched (network/HTTP failure), TZ §5.4. */
 export class ManifestFetchError extends LocalAiError {
+  /** @param message Human-readable detail. @param options Standard `ErrorOptions`. */
   constructor(message: string, options?: ErrorOptions) {
     super('manifest_fetch_failed', message, options);
   }
@@ -37,6 +41,7 @@ export class ManifestFetchError extends LocalAiError {
 
 /** Manifest was fetched but failed schema/consistency validation, TZ §5.2. */
 export class ManifestValidationError extends LocalAiError {
+  /** @param message Human-readable detail — includes every failed rule, not just the first. @param options Standard `ErrorOptions`. */
   constructor(message: string, options?: ErrorOptions) {
     super('manifest_invalid', message, options);
   }
@@ -44,6 +49,7 @@ export class ManifestValidationError extends LocalAiError {
 
 /** Base class for artifact download failures, TZ §7. */
 export class DownloadError extends LocalAiError {
+  /** @param code Stable machine-readable code for this specific download failure kind. @param message Human-readable detail. @param options Standard `ErrorOptions`. */
   constructor(code: string, message: string, options?: ErrorOptions) {
     super(code, message, options);
   }
@@ -51,6 +57,7 @@ export class DownloadError extends LocalAiError {
 
 /** Downloaded artifact's SHA-256 does not match the manifest, TZ §7.1/§14. */
 export class ChecksumMismatchError extends DownloadError {
+  /** @param message Human-readable detail. @param options Standard `ErrorOptions`. */
   constructor(message: string, options?: ErrorOptions) {
     super('checksum_mismatch', message, options);
   }
@@ -58,6 +65,7 @@ export class ChecksumMismatchError extends DownloadError {
 
 /** Not enough free disk space for the artifact, TZ §6.2. */
 export class InsufficientStorageError extends DownloadError {
+  /** @param message Human-readable detail. @param options Standard `ErrorOptions`. */
   constructor(message: string, options?: ErrorOptions) {
     super('insufficient_storage', message, options);
   }
@@ -65,6 +73,7 @@ export class InsufficientStorageError extends DownloadError {
 
 /** Native LLM/embedding runtime failed to initialize, TZ §10.2. */
 export class RuntimeInitError extends LocalAiError {
+  /** @param message Human-readable detail. @param options Standard `ErrorOptions`. */
   constructor(message: string, options?: ErrorOptions) {
     super('runtime_init_failed', message, options);
   }
@@ -72,6 +81,7 @@ export class RuntimeInitError extends LocalAiError {
 
 /** A generation is already in progress on the single shared runtime context, TZ §9.4. */
 export class RuntimeBusyError extends LocalAiError {
+  /** @param message Human-readable detail. @param options Standard `ErrorOptions`. */
   constructor(message: string, options?: ErrorOptions) {
     super('runtime_busy', message, options);
   }
@@ -79,6 +89,7 @@ export class RuntimeBusyError extends LocalAiError {
 
 /** A saved session file is missing/corrupt/incompatible with the current model version, TZ §9.3. */
 export class SessionIncompatibleError extends LocalAiError {
+  /** @param message Human-readable detail. @param options Standard `ErrorOptions`. */
   constructor(message: string, options?: ErrorOptions) {
     super('session_incompatible', message, options);
   }
@@ -86,6 +97,7 @@ export class SessionIncompatibleError extends LocalAiError {
 
 /** VectorStore guard: the requested embedding space doesn't match `vector_space`, TZ §8.2. */
 export class VectorSpaceMismatchError extends LocalAiError {
+  /** @param message Human-readable detail — which space was expected vs. given. @param options Standard `ErrorOptions`. */
   constructor(message: string, options?: ErrorOptions) {
     super('vector_space_mismatch', message, options);
   }
@@ -93,6 +105,7 @@ export class VectorSpaceMismatchError extends LocalAiError {
 
 /** `contextStrategy: 'fail'` and the prompt does not fit `maxContextTokens`, TZ §9.7. */
 export class ContextWindowExceededError extends LocalAiError {
+  /** @param message Human-readable detail. @param options Standard `ErrorOptions`. */
   constructor(message: string, options?: ErrorOptions) {
     super('context_window_exceeded', message, options);
   }
@@ -108,6 +121,7 @@ export class ContextWindowExceededError extends LocalAiError {
  * any test overrides on top).
  */
 export class ConfigInvalidError extends LocalAiError {
+  /** @param message Human-readable detail — names exactly which config/port is missing or invalid. @param options Standard `ErrorOptions`. */
   constructor(message: string, options?: ErrorOptions) {
     super('config_invalid', message, options);
   }

@@ -28,7 +28,7 @@ const coreBoundaryRule = {
 export default [
   js.configs.recommended,
   {
-    ignores: ['dist/**', 'node_modules/**', 'coverage/**', 'examples/**/dist/**'],
+    ignores: ['dist/**', 'node_modules/**', 'coverage/**', 'examples/**/dist/**', 'docs/typedoc/**'],
   },
   {
     files: ['**/*.ts'],
@@ -60,14 +60,13 @@ export default [
     },
   },
   {
-    // Public API surface: every exported class/interface/type alias under
-    // core/client, core/ports, core/errors and core/types must carry a JSDoc
-    // block (TZ §12 — "eslint-plugin-jsdoc проваливает сборку при пропуске").
-    // Scoped to top-level declarations for now, not every individual member —
-    // ROADMAP.md Phase 7.2 tightens this to full per-method coverage once the
-    // stub bodies below become real implementations worth documenting in
-    // detail; enforcing that today would just produce boilerplate on
-    // `throw new Error('not implemented')` placeholders.
+    // Public API surface: every exported class/interface/type alias *and*
+    // every public method on `LocalAiClient` under core/client, core/ports,
+    // core/errors and core/types must carry a JSDoc block (TZ §12 —
+    // "eslint-plugin-jsdoc проваливает сборку при пропуске"). ROADMAP.md
+    // Phase 7.2's "full per-method coverage" — the stub-era carve-out this
+    // comment used to describe no longer applies now that those bodies are
+    // real implementations worth documenting in detail.
     files: ['src/core/client/**/*.ts', 'src/core/ports/**/*.ts', 'src/core/errors.ts', 'src/core/types.ts'],
     plugins: { jsdoc },
     rules: {
@@ -77,8 +76,15 @@ export default [
           publicOnly: true,
           require: {
             ClassDeclaration: true,
+            MethodDefinition: true,
           },
           contexts: ['TSInterfaceDeclaration', 'TSTypeAliasDeclaration'],
+          // Trivial one-line `constructor(message, options) { super(...) }`
+          // overrides on error subclasses (src/core/errors.ts) don't need a
+          // JSDoc block distinct from their class's — the class doc already
+          // explains what the error means; a fixed super()-call signature
+          // has nothing more to say.
+          exemptEmptyConstructors: true,
         },
       ],
     },
@@ -91,6 +97,15 @@ export default [
     files: ['test/**/*.ts'],
     rules: {
       'no-restricted-imports': 'off',
+    },
+  },
+  {
+    // Illustrative example code (ROADMAP.md Phase 7.6) — console.log output
+    // is the point, not a lint smell the way it would be inside the
+    // published library itself (TZ §14's "no console.log in prod").
+    files: ['examples/**/*.ts'],
+    rules: {
+      'no-console': 'off',
     },
   },
 ];

@@ -185,6 +185,12 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
     return new SupportChecker(ports.platformSupport).check();
   }
 
+  /**
+   * TZ §6.4 — evaluates `target` against the current device snapshot plus
+   * any locally-cached `LocalRuntimeVerdict`. Resolves `verdict: 'unknown'`
+   * (never throws) if no manifest is cached yet.
+   * @param target Which artifact to evaluate — defaults to `'model'`.
+   */
   async checkDeviceEligibility(target: 'model' | 'embedding' = 'model'): Promise<EligibilityReport> {
     const manifest = this.currentManifest ?? (await this.manifestService.getCachedManifest());
     if (!manifest) {
@@ -204,10 +210,18 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
     });
   }
 
+  /** TZ §6.3 — clears every locally-cached `LocalRuntimeVerdict` (`'tooSlow'`/`'oom'`), e.g. after the user frees device memory. */
   async resetLocalVerdicts(): Promise<void> {
     await this.eligibilityService.resetLocalVerdicts();
   }
 
+  /**
+   * Fetches, validates, and caches the manifest at `manifestUrl`
+   * (`If-None-Match`, TZ §5.3); emits `manifest:updated` on a genuine
+   * change or `manifest:invalid` on a validation failure — either way this
+   * method itself never throws unless there's no cached manifest at all to
+   * fall back to (TZ §5.2).
+   */
   async refreshManifest(): Promise<ManifestDiff> {
     try {
       const { manifest, diff } = await this.manifestService.refresh();
@@ -267,6 +281,13 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
     }
   }
 
+  /**
+   * TZ §5.5/§6.4: support check → eligibility gate → download + sha256
+   * verify (resumable, short-circuits if already downloaded) → load into
+   * the native runtime. Safe to call repeatedly — a no-op once the model
+   * is already loaded.
+   * @param options.onProgress Called with download progress while the artifact is being fetched.
+   */
   async ensureModelReady(options?: { onProgress?: (p: DownloadProgress) => void }): Promise<void> {
     await this.ensureSupportOk();
     await this.ensureManifestLoaded();
@@ -301,6 +322,11 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
     }
   }
 
+  /**
+   * Same flow as {@link ensureModelReady}, independently, for the
+   * embedding artifact (TZ §5.6/§6.4).
+   * @param options.onProgress Called with download progress while the artifact is being fetched.
+   */
   async ensureEmbeddingReady(options?: { onProgress?: (p: DownloadProgress) => void }): Promise<void> {
     await this.ensureSupportOk();
     await this.ensureManifestLoaded();
@@ -331,6 +357,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
     }
   }
 
+  /** `ensureModelReady()` + `ensureEmbeddingReady()`, in order. */
   async ensureReady(options?: { onProgress?: (p: DownloadProgress) => void }): Promise<void> {
     await this.ensureModelReady(options);
     await this.ensureEmbeddingReady(options);
@@ -437,6 +464,15 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
     this.emit('runtime:embedding-loaded', { embeddingId: artifact.id, version: artifact.version });
   }
 
+  /**
+   * Stateless completion — no chat/session involvement, just `input.messages`
+   * in, tokens streamed out (TZ §10.0). `result` rejects with
+   * `RuntimeInitError` if `ensureModelReady()` hasn't been called yet, or
+   * with `RuntimeBusyError` if another generation is already in flight
+   * (TZ §9.4) — the async-iterable side yields nothing in either case.
+   * @param input Structured chat messages + sampling options — never a raw prompt string (TZ §4.1).
+   * @param signal Optional `AbortSignal` to cancel mid-generation.
+   */
   complete(input: CompletionInput, signal?: AbortSignal): CompletionStream<CompletionResult> {
     if (!this.modelLoaded || !this.currentManifest) {
       return rejectedCompletionStream(new RuntimeInitError('call ensureModelReady() before complete()'));
@@ -444,6 +480,11 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
     return this.runtimeFacade.complete(input, { chatTemplate: this.currentManifest.model.chatTemplate }, signal);
   }
 
+  /**
+   * Embeds `text` using the currently loaded embedding model.
+   * @param text A single string, or a batch of strings (embedded sequentially — the underlying runtime has no native batch API).
+   * @throws {RuntimeInitError} If `ensureEmbeddingReady()` hasn't been called yet.
+   */
   async embed(text: string | string[]): Promise<Float32Array | Float32Array[]> {
     if (!this.embeddingLoaded) {
       throw new RuntimeInitError('call ensureEmbeddingReady() before embed()');
@@ -455,6 +496,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
   // Pass-through to ConversationStore (Phase 3) — cheap to wire once that
   // class exists, see this class's doc comment.
 
+  /** Creates a new chat — `options.id` is generated if omitted (TZ §9.2). `options.systemPrompt`, if given, is inserted as the chat's first message. */
   async createChat(options?: {
     id?: string;
     title?: string;
@@ -466,24 +508,29 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
     return chat;
   }
 
+  /** Lists chats, most recently active first by default (TZ §9.2). */
   async listChats(options?: { limit?: number; offset?: number; orderBy?: 'updatedAt' | 'createdAt' }): Promise<Chat[]> {
     return this.conversationStore.listChats(options);
   }
 
+  /** Resolves `null` if no chat with this id exists. */
   async getChat(chatId: string): Promise<Chat | null> {
     return this.conversationStore.getChat(chatId);
   }
 
+  /** Renames a chat and bumps its `updatedAt`. */
   async renameChat(chatId: string, title: string): Promise<void> {
     await this.conversationStore.renameChat(chatId, title);
   }
 
+  /** Deletes a chat, cascading to its messages (SQL) and session-cache file (TZ §9.2). */
   async deleteChat(chatId: string): Promise<void> {
     await this.conversationStore.deleteChat(chatId);
     await this.sessionCache.deleteForChat(chatId); // the other half of TZ §9.2's cascade — SQL + session file
     this.emit('chat:deleted', { chatId });
   }
 
+  /** Returns a chat's full stored message history, oldest first, unaffected by any context-window truncation applied during generation (TZ §9.7). */
   async getMessages(chatId: string, options?: { limit?: number; before?: string }): Promise<ChatMessage[]> {
     return this.conversationStore.getMessages(chatId, options);
   }
@@ -597,6 +644,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
   // --- ConversationSyncApi (optional, TZ §9.2/§9.6) — Mode B ---
   // Pass-through to ConversationStore, same pattern as the Mode-A methods above.
 
+  /** Idempotent upsert by id — Mode B (TZ §9.6): creates the chat if missing; on an existing id, only `title`/`metadata`/`updatedAt` are touched, messages are never affected. */
   async upsertChat(chat: {
     id: string;
     title: string;
@@ -607,6 +655,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
     return this.conversationStore.upsertChat(chat);
   }
 
+  /** Idempotent append — Mode B (TZ §9.6): dedups by `(chatId, id)`, silently skipping messages that already exist rather than overwriting them. Implicitly creates the chat if `chatId` doesn't exist yet. */
   async appendMessages(
     chatId: string,
     messages: Array<{
@@ -717,6 +766,12 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
     await this.ensureEmbeddingReady();
   }
 
+  /**
+   * Subscribes to one of `LocalAiEventMap`'s events (TZ §10.1). Returns an
+   * `Unsubscribe` function — call it to stop listening.
+   * @param event Event name.
+   * @param handler Called with the event's payload each time it fires.
+   */
   on<E extends keyof LocalAiEventMap>(event: E, handler: (payload: LocalAiEventMap[E]) => void): Unsubscribe {
     let set = this.listeners.get(event);
     if (!set) {

@@ -18,4 +18,15 @@ export default defineConfig({
   clean: true,
   splitting: false,
   treeshake: true,
+  // tsup/esbuild auto-externalizes `dependencies`/`peerDependencies` (the
+  // Capacitor plugins here are all `peerDependencies`) but *not*
+  // `devDependencies` — `node-llama-cpp` is a devDependency (TZ §3.1's
+  // diagram: node-testing's own deps belong in the core package's
+  // devDependencies, a consumer using that subpath installs it themselves),
+  // and bundling it pulls in `@reflink/reflink`'s per-platform native
+  // `.node` bindings, which esbuild can't resolve for platforms other than
+  // the one actually running the build — breaks the build entirely, not
+  // just a bloat concern. Must stay external regardless of which
+  // dependency list it's in.
+  external: ['node-llama-cpp'],
 });

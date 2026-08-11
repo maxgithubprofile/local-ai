@@ -346,21 +346,49 @@ regardless of platform and isn't something a device pass would meaningfully chan
 
 ## Phase 7 — Documentation and hardening (TZ §15 row 7)
 
-- [ ] **7.1 README quickstart** — replace the WIP placeholder in the root `README.md` with a real,
-  runnable example against the now-implemented API.
-- [ ] **7.2 100% JSDoc gate** — audit every exported symbol; `eslint-plugin-jsdoc` should already be
-  failing CI on gaps, this task is closing the last of them.
-- [ ] **7.3 TypeDoc site** — `pnpm docs` wired into CI as an artifact/publish step.
-- [ ] **7.4 Guides** (`docs/guides/`) — one file per topic listed in TZ §12: first run,
-  support/eligibility checks, multiple chats, Mode B integration, independent model/embedding
-  updates, memory/lifecycle, testing consumer apps, manifest format.
-- [ ] **7.5 ADR archive completeness** — confirm every TZ §12-listed ADR topic has a corresponding
-  file under `docs/adr/` (native plugin choice, SQLite plugin, sqlite-vec/iOS, downloader,
-  device-info + threshold calibration).
-- [ ] **7.6 Example app** — flesh out `examples/minimal-capacitor-app/`: 2+ chats, one in Mode B,
-  independent embedding update, "device not supported/not eligible" screen.
+- [x] **7.1 README quickstart** — replaced the WIP placeholder with a real example against the
+  implemented API (Capacitor port assembly, `checkSupport`→`create`→`ensureReady`→`createChat`→
+  `sendMessage`), an honest "what's verified vs. not" section, and an updated "where things live"
+  table reflecting the `adapters/shared/`/`core/utils/` moves from Phases 4-5. **Done 2026-08-11.**
+- [x] **7.2 100% JSDoc gate** — tightened `eslint.config.js`'s `jsdoc/require-jsdoc` from
+  top-level-declarations-only to also require every public method on the scoped files
+  (`core/client`, `core/ports`, `core/errors.ts`, `core/types.ts`); closed all 45 gaps this surfaced
+  (31 methods on `LocalAiClient`, 14 error-class constructors — `exemptEmptyConstructors` didn't
+  cover TS's constructor-with-`super()`-call shape, written by hand instead). **Done 2026-08-11**,
+  `pnpm lint` green with the tightened rule.
+- [x] **7.3 TypeDoc site** — added `typedoc.json` (3 entry points matching the package's subpaths),
+  wired `pnpm run docs` into `.github/workflows/ci.yml` as an `actions/upload-artifact` step.
+  **Done 2026-08-11.** Along the way, found and fixed two real, previously-undiscovered problems:
+  `pnpm run build` (`tsup`) was completely broken (bundling `node-llama-cpp`'s transitive
+  `@reflink/reflink` native per-platform bindings, which esbuild can't resolve for platforms other
+  than the host's — fixed via `external: ['node-llama-cpp']` in `tsup.config.ts`, since
+  `devDependencies` aren't auto-externalized by tsup the way `dependencies`/`peerDependencies` are);
+  and `docs/typedoc/**`'s generated output wasn't excluded from `eslint.config.js`'s `ignores`,
+  so generating the site once broke `pnpm run lint` on ~140 browser-globals errors in its own bundled
+  JS assets. Both are now part of `pnpm test`'s/CI's regular path, not just discovered once.
+- [x] **7.4 Guides** (`docs/guides/`) — all 8 topics from TZ §12: `first-run.md`,
+  `support-and-eligibility.md`, `multiple-chats.md`, `mode-b-integration.md`,
+  `independent-model-embedding-updates.md`, `memory-and-lifecycle.md`, `testing-consumer-apps.md`,
+  `manifest-format.md`, plus a `docs/guides/README.md` index. **Done 2026-08-11.**
+- [x] **7.5 ADR archive completeness** — confirmed all 5 TZ §12-listed topics now have a dedicated
+  ADR: native inference plugin (0001), SQLite plugin choice (**0007, added now** — was previously
+  only implicitly covered by 0002's narrower sqlite-vec-loadExtension question), sqlite-vec/iOS
+  (0002), downloader (0003), device-info + threshold calibration (0004). **Done 2026-08-11.**
+- [x] **7.6 Example app** (`examples/minimal-capacitor-app/`) — real, complete TypeScript source
+  (not a scaffolded buildable Capacitor project — its own `README.md` explains why and what to do
+  with it) covering every item TZ asks for: 2+ chats (`chats.ts`), one in Mode B (`mode-b-chat.ts`),
+  independent embedding update (`embedding-update.ts`), a "device not supported" screen
+  (`eligibility-screen.ts`) plus inline `DeviceNotEligibleError` handling for the "not eligible" case.
+  **Done 2026-08-11.**
 
-**Phase 7 exit criterion (TZ §15):** example app builds and passes a manual happy-path run.
+**Phase 7 exit criterion (TZ §15):** example app builds and passes a manual happy-path run. **Status:
+met in spirit, not literally** — the example app is real, type-plausible source code exercising every
+scenario TZ asks for, but (per its own README) isn't a scaffolded, independently-buildable Capacitor
+project in this environment (no native Android/iOS toolchain, no `npx @capacitor/cli create` run) —
+"builds and passes a manual happy-path run" needs a real device/emulator the same way every other
+Capacitor-adapter-touching claim in this ROADMAP does. What *is* mechanically verified here: `pnpm
+run build`, `pnpm run docs`, and all 162 tests (96 unit + 33 integration + 33 contract) green — see
+Phase 7.3's note for two real bugs that check caught.
 
 ---
 

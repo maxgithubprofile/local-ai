@@ -43,3 +43,16 @@ jobs:
 
       - name: Contract tests
         run: pnpm run test:contract
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Generate TypeDoc site
+        run: pnpm run docs
+
+      - name: Upload TypeDoc site artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: typedoc-site
+          path: docs/typedoc
+          retention-days: 30

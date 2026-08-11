@@ -1,0 +1,16 @@
+{
+  "name": "minimal-capacitor-app",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Worked example of local-ai's API surface — TZ §12, ROADMAP.md Phase 7.6. See README.md: this is illustrative source, not a scaffolded/buildable Capacitor project (no android/ios native folders, no bundler config) — copy the patterns into a real `npx @capacitor/cli create` app.",
+  "dependencies": {
+    "local-ai": "workspace:*",
+    "@capacitor/core": "^8.0.0",
+    "@capacitor/app": "^8.0.0",
+    "@capacitor/filesystem": "^8.0.0",
+    "@capacitor-community/sqlite": "^8.0.0",
+    "@capgo/capacitor-downloader": "^8.0.0",
+    "@capgo/capacitor-device-info": "^8.0.0",
+    "llama-cpp-capacitor": "^0.1.5"
+  }
+}
