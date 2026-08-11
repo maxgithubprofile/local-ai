@@ -11,6 +11,7 @@ import { ConversationStore } from '../conversations/conversation-store.js';
 import { SessionCache } from '../conversations/session-cache.js';
 import { buildContextWindow, defaultMaxContextTokens, estimateTokensHeuristic } from '../conversations/context-window-policy.js';
 import { RuntimeFacade } from '../runtime/runtime-facade.js';
+import { LifecycleManager } from '../runtime/lifecycle-manager.js';
 import { DownloadEngine } from '../download/download-engine.js';
 import { ModelRegistry } from '../registry/model-registry.js';
 import {
@@ -99,12 +100,7 @@ function rejectedCompletionStream<T>(error: Error): CompletionStream<T> {
   return { [Symbol.asyncIterator]: () => emptyAsyncIterable<never>()[Symbol.asyncIterator](), result: Promise.reject(error) };
 }
 
-/**
- * Single public entry point — TZ §10. Every method except `sendMessage()`'s
- * cancel/error partial-content edge cases documented in TZ §9.8 (see that
- * method's own comment) is real. `destroy()` remains a stub — Phase 6
- * (`LifecycleManager`) owns it.
- */
+/** Single public entry point — TZ §10. */
 export class LocalAiClient implements ConversationApi, ConversationSyncApi {
   private currentManifest: LocalAiManifest | null = null;
   private modelLoaded = false;
@@ -123,6 +119,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
     private readonly modelRegistry: ModelRegistry,
     private readonly runtimeFacade: RuntimeFacade,
     private readonly downloadEngine: DownloadEngine,
+    private readonly lifecycleManager: LifecycleManager,
   ) {}
 
   /** Creates and initializes a client from config + optional port overrides. TZ §10. */
@@ -140,6 +137,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
     const modelRegistry = new ModelRegistry(ports.sqlite, ports.clock);
     const runtimeFacade = new RuntimeFacade(ports.llmRuntime);
     const downloadEngine = new DownloadEngine(ports.downloadTransport, ports.fileSystem, ports.hash, ports.sqlite, ports.clock);
+    const lifecycleManager = new LifecycleManager(ports.llmRuntime, ports.sqlite);
 
     const client = new LocalAiClient(
       config,
@@ -153,8 +151,15 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
       modelRegistry,
       runtimeFacade,
       downloadEngine,
+      lifecycleManager,
     );
     client.currentManifest = await manifestService.getCachedManifest();
+
+    // TZ §11.2 — opt-in only, default false; never an eager reload on refocus.
+    if (config.autoUnloadOnBackground) {
+      lifecycleManager.enableAutoUnloadOnBackground(ports.appLifecycle, () => client.doReleaseRuntime(undefined, 'background'));
+    }
+
     return client;
   }
 
@@ -636,9 +641,26 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
     },
   };
 
-  /** Releases native runtime contexts + in-memory caches only — see TZ §11.1 for the exact boundary. */
-  async releaseRuntime(_options?: { closeDatabase?: boolean }): Promise<void> {
-    throw new Error(NOT_IMPLEMENTED);
+  /**
+   * Releases native runtime contexts + in-memory caches only — see TZ
+   * §11.1 for the exact boundary (never touches on-disk files, chats,
+   * `download_state`, or session-cache files; only their in-memory
+   * handles). Idempotent — safe to call with nothing loaded.
+   */
+  async releaseRuntime(options?: { closeDatabase?: boolean }): Promise<void> {
+    await this.doReleaseRuntime(options, 'manual');
+  }
+
+  private async doReleaseRuntime(
+    options: { closeDatabase?: boolean } | undefined,
+    reason: LocalAiEventMap['runtime:unloaded']['reason'],
+  ): Promise<void> {
+    await this.lifecycleManager.releaseRuntime(options);
+    this.modelLoaded = false;
+    this.embeddingLoaded = false;
+    this.currentManifest = null; // in-memory only — still recoverable from kv_store via getCachedManifest()
+    this.sessionCache.resetHotHandle();
+    this.emit('runtime:unloaded', { reason });
   }
 
   /** @deprecated Use {@link releaseRuntime} — same method, TZ §11.0 explains the rename. */
@@ -646,8 +668,18 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
     return this.releaseRuntime(options);
   }
 
+  /**
+   * Explicit eager reload after a {@link releaseRuntime} — TZ §11.2
+   * deliberately does *not* do this automatically on refocus (the next
+   * `complete()`/`sendMessage()`/etc. call lazily raises the context on
+   * its own regardless); this method exists purely for a consumer that
+   * wants to pay that latency upfront instead. Re-downloads nothing new —
+   * `ensureModelReady()`/`ensureEmbeddingReady()` short-circuit once the
+   * artifact is already on disk and verified.
+   */
   async reload(): Promise<void> {
-    throw new Error(NOT_IMPLEMENTED);
+    await this.ensureModelReady();
+    await this.ensureEmbeddingReady();
   }
 
   on<E extends keyof LocalAiEventMap>(event: E, handler: (payload: LocalAiEventMap[E]) => void): Unsubscribe {
@@ -666,8 +698,17 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
     for (const handler of set) (handler as (payload: LocalAiEventMap[E]) => void)(payload);
   }
 
+  /**
+   * Full teardown — releases the runtime *and* closes the database
+   * connection, stops listening for app-lifecycle transitions, and drops
+   * every registered event handler. Not part of TZ §11's release-boundary
+   * table (that's `releaseRuntime()`'s job specifically) — this is the
+   * "I'm done with this `LocalAiClient` instance entirely" method.
+   */
   async destroy(): Promise<void> {
-    throw new Error(NOT_IMPLEMENTED);
+    this.lifecycleManager.disableAutoUnloadOnBackground();
+    await this.doReleaseRuntime({ closeDatabase: true }, 'manual');
+    this.listeners.clear();
   }
 }
 

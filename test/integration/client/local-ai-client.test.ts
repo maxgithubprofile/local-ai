@@ -15,7 +15,7 @@ import { NodeSqliteAdapter } from '../../../src/adapters/node-testing/node-sqlit
 import { NodeRangeDownloadAdapter } from '../../../src/adapters/node-testing/node-range-download.adapter.js';
 import { WebCryptoHashAdapter } from '../../../src/adapters/shared/web-crypto-hash.adapter.js';
 import { createMockDownloadServer } from '../download/mock-http-server.js';
-import { ConfigInvalidError, DeviceNotEligibleError } from '../../../src/core/errors.js';
+import { ConfigInvalidError, DeviceNotEligibleError, RuntimeInitError } from '../../../src/core/errors.js';
 import type { DeviceSnapshot } from '../../../src/core/support/types.js';
 
 const realFetch = globalThis.fetch;
@@ -415,5 +415,90 @@ describe('LocalAiClient', () => {
 
     expect(result).toEqual({ inserted: 1, skippedExisting: 0 });
     expect(await client.getMessages('host-chat-1')).toHaveLength(1);
+  });
+
+  // --- releaseRuntime() / reload() / destroy() / autoUnloadOnBackground — TZ §11 ---
+
+  it('releaseRuntime() releases both contexts, keeps chats/files, and is idempotent', async () => {
+    const client = await LocalAiClient.create({ manifestUrl, ports });
+    await client.refreshManifest();
+    await client.ensureModelReady();
+    await client.ensureEmbeddingReady();
+    const chat = await client.createChat({ title: 'Survives release' });
+
+    let unloadedReason: string | undefined;
+    client.on('runtime:unloaded', (e) => {
+      unloadedReason = e.reason;
+    });
+
+    await client.releaseRuntime();
+    expect(unloadedReason).toBe('manual');
+    expect(llmRuntime.modelLoaded).toBe(false);
+    expect(llmRuntime.embeddingModelLoaded).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, 'models', 'model.gguf'))).toBe(true); // file untouched
+    expect(await client.getChat(chat.id)).not.toBeNull(); // chat untouched
+
+    await expect(client.releaseRuntime()).resolves.toBeUndefined(); // idempotent
+
+    // complete() after release correctly reports "not ready" again, same as before the first ensureModelReady().
+    const stream = client.complete({ messages: [{ role: 'user', content: 'hi' }] });
+    await expect(stream.result).rejects.toThrow(RuntimeInitError);
+  });
+
+  it('unloadAll() is an alias for releaseRuntime()', async () => {
+    const client = await LocalAiClient.create({ manifestUrl, ports });
+    await client.refreshManifest();
+    await client.ensureModelReady();
+
+    await client.unloadAll();
+
+    expect(llmRuntime.modelLoaded).toBe(false);
+  });
+
+  it('reload() re-establishes the model/embedding after a release without a network re-fetch', async () => {
+    const client = await LocalAiClient.create({ manifestUrl, ports });
+    await client.refreshManifest();
+    await client.ensureModelReady();
+    await client.ensureEmbeddingReady();
+    await client.releaseRuntime();
+    expect(llmRuntime.modelLoaded).toBe(false);
+
+    await client.reload();
+
+    expect(llmRuntime.modelLoaded).toBe(true);
+    expect(llmRuntime.embeddingModelLoaded).toBe(true);
+  });
+
+  it('autoUnloadOnBackground releases the runtime when the app backgrounds, without an eager reload on refocus', async () => {
+    const client = await LocalAiClient.create({ manifestUrl, ports, autoUnloadOnBackground: true });
+    await client.refreshManifest();
+    await client.ensureModelReady();
+
+    const appLifecycle = ports.appLifecycle as FakeAppLifecycleAdapter;
+    appLifecycle.setActive(false);
+    await Promise.resolve(); // let the fire-and-forget release settle
+
+    expect(llmRuntime.modelLoaded).toBe(false);
+
+    appLifecycle.setActive(true); // refocus — TZ §11.2: no eager reload
+    await Promise.resolve();
+    expect(llmRuntime.modelLoaded).toBe(false);
+  });
+
+  it('destroy() releases the runtime, closes the database, and clears event listeners', async () => {
+    const client = await LocalAiClient.create({ manifestUrl, ports });
+    await client.refreshManifest();
+    await client.ensureModelReady();
+
+    let sawEvent = false;
+    client.on('runtime:unloaded', () => {
+      sawEvent = true;
+    });
+
+    await client.destroy();
+
+    expect(sawEvent).toBe(true);
+    expect(llmRuntime.modelLoaded).toBe(false);
+    await expect(ports.sqlite.query('SELECT 1')).rejects.toBeDefined();
   });
 });

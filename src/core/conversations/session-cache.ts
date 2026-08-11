@@ -103,6 +103,19 @@ export class SessionCache {
     }
   }
 
+  /**
+   * Forgets which chat is hot **without touching any file on disk** — TZ
+   * §11.1's `releaseRuntime()` resets "the in-memory hot session-cache
+   * handle" specifically, never the session files themselves (those stay
+   * exactly as valid as before; the runtime's actual in-process KV state is
+   * what `LifecycleManager.releaseRuntime()` already released, which is
+   * what makes this pointer stale in the first place).
+   */
+  resetHotHandle(): void {
+    this.activeChatId = null;
+    this.activeFingerprint = null;
+  }
+
   /** The chat currently holding the runtime's hot KV state, if any. */
   get activeChat(): string | null {
     return this.activeChatId;
