@@ -39,6 +39,9 @@ export { DEFAULT_SESSION_CACHE_SLOTS } from './conversations/session-cache.js';
 export type { VectorSpaceDescriptor, VectorEntry, VectorSearchHit, VectorStore } from './db/vector-store.js';
 export type { MessageSearchIndex } from './db/message-search-index.js';
 
+// LogLevel/LogEntry are already re-exported via `export * from './types.js'` above.
+export type { LogExportApi } from './logging/logging.types.js';
+
 export type { LocalAiPorts } from './ports/index.js';
 export type {
   PlatformSupportPort,

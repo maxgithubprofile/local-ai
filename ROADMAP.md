@@ -516,3 +516,115 @@ device before a v1 release, same as ADR 0003/0004's residual risk. Two lower-sev
 the same audit pass (unvalidated `embedding.dimensions` reaching a SQL DDL string;
 `HuggingFaceSource.repo`/`.file` going unchecked) were flagged but deliberately not scoped in here —
 see `docs/decisions.md`'s "Security audit (2026-08-11)" section; revisit if/when requested.
+
+---
+
+## Local logging & export — 2026-08-11, requested
+
+Not a TZ §15 phase (TZ §14 only specifies a pass-through `logger?: LocalAiLogger` config, no-op by
+default) — user asked for a local, persisted log store the host app can read back later via an in-app
+"export logs" button. See `docs/decisions.md`'s "Local logging & export (2026-08-11, requested)"
+section for the reasoning behind each decision below (storage backend and default-on-vs-opt-in were
+asked via `AskUserQuestion`; retention numbers and the export API shape are smallest-reasonable-
+assumption defaults, logged there rather than guessed silently).
+
+**Finding this section also fixes:** `LocalAiConfig.logger`/`LocalAiLogger` (TZ §14) is declared and
+exported but never actually called anywhere in `src/` — a dead stub since it was first typed. LOG.3
+wires it for real, not just the new persisted store.
+
+- [x] **LOG.1 `logs` migration** (`src/core/db/migrations/004_logs.ts`) — use the `add-migration`
+  skill. Columns: `id` (autoincrement PK), `ts` (ms epoch, via `ClockPort` — never `Date.now()`
+  directly, matches every other timestamped table), `level` (`'debug'|'info'|'warn'|'error'`),
+  `message` (text), `meta_json` (nullable text, `JSON.stringify`d structured payload). Index on `ts`
+  for the prune-oldest and `since`-filtered query paths.
+  **Done 2026-08-11** — one correction while implementing: `ts` is `TEXT` ISO-8601 via
+  `ClockPort.nowIso()`, not ms epoch — the claim above that ms epoch "matches every other timestamped
+  table" was backwards, every other `*_at`/timestamp column in `001_init.sql` (`chats.created_at`,
+  `installed_artifacts.installed_at`, …) is ISO-8601 `TEXT`; ms epoch would have been the odd one out.
+  Migration 4, `idx_logs_ts` index included.
+- [x] **LOG.2 `LogStore`** (`src/core/logging/log-store.ts`) — wraps `SqlitePort` directly (same shape
+  as `ConversationStore`/`Database`), not a new port: `append(entry)` (prunes oldest rows past
+  `maxEntries` in the same transaction), `query({ since?, level?, limit?, offset? })`, `clear()`.
+  Contract test under `test/contract/log-store.contract.ts`, parametrized over
+  `NodeSqliteAdapter`/`CapacitorSqliteAdapter` exactly like `conversation-store.contract.ts`.
+  **Done 2026-08-11** — `maxEntries` (default `DEFAULT_LOG_MAX_ENTRIES = 5000`) is a constructor
+  option, same shape as `SessionCache`'s `{ maxSlots }`. `query()`'s `level` filter is a
+  minimum-severity threshold (`levelMeetsThreshold()`, `log-levels.ts`), not exact match — expanded to
+  a SQL `IN (...)` clause rather than filtering in TS, so `limit`/`offset` still page the right rows.
+  10 contract tests against `NodeSqliteAdapter` (Capacitor path carries the same "unverified without a
+  device" caveat as every other `CapacitorSqliteAdapter` path in this ROADMAP).
+- [x] **LOG.3 Wire real internal logging** — new `LocalAiConfig.logging?: { enabled?: boolean;
+  minLevel?: LogLevel; maxEntries?: number }` (default `enabled: false`; when enabled, default
+  `minLevel: 'info'`, `maxEntries: 5000`). Add an internal log-dispatch helper in `LocalAiClient`
+  that (a) always calls `config.logger` if supplied (preserves existing TZ §14 no-op-by-default
+  behavior, now actually wired), and (b) additionally appends to `LogStore` when `config.logging.enabled`
+  and the entry's level meets `minLevel`. Hook it into the existing single-choke-point `emit()`
+  (`local-ai-client.ts`) so every `LocalAiEventMap` event (`manifest:invalid`, `download:failed`,
+  `device:eligibility-warning`, `runtime:*`, `vector-store:fallback-active`,
+  `chat-search:fallback-active`, etc.) logs itself for free, plus explicit `error`-level calls at the
+  catch sites that throw without emitting an event (e.g. `RuntimeInitError`/`DownloadError` rethrows).
+  **Done 2026-08-11** — also fixes `download:failed` (declared in `LocalAiEventMap` since Phase 8/9 but
+  never once emitted — `ensureModelReady()`/`ensureEmbeddingReady()`/`switchModel()`/`switchEmbedding()`
+  now route every `DownloadEngine.downloadArtifact()` call through one `downloadArtifactLogged()`
+  wrapper that emits it on failure). One real bug found and fixed while wiring this: `emit()`
+  calling `LogStore.append()` **fire-and-forget** deadlocked `NodeSqliteAdapter`'s single connection
+  ("cannot start a transaction within a transaction") the moment two loggable events fired close
+  together (reproduced by `create()`'s own `vector-store:fallback-active` +
+  `chat-search:fallback-active` emits racing each other, then racing the next `createChat()`) — fixed
+  by making `emit()`/`dispatchLog()` `async` and `await`ing every call site, so the persisted-log write
+  is always fully sequenced with the rest of a method's own `SqlitePort` calls, same discipline the
+  rest of the codebase already relies on for that shared connection. Two narrow exceptions, both
+  logger-callback-only (never touch `LogStore`, so never open a transaction): `download:progress`
+  (fires from a genuinely synchronous, non-`await`-able `onProgress` callback, and is high-frequency
+  enough that persisting it would evict everything else against `maxEntries` anyway), and the
+  handful of throw sites on methods that must themselves stay synchronous-returning by contract
+  (`complete()`, `sendMessage()`'s pre-check, three "should never happen after create()" defensive
+  guards) — see `local-ai-client.ts`'s `emit()`/`dispatchLog()` doc comments for the full reasoning.
+- [x] **LOG.4 `LogExportApi`** on `LocalAiClient` — `exportLogs(options?: { since?: Date; level?:
+  LogLevel; limit?: number }): Promise<LogEntry[]>` delegating to `LogStore.query()`; `clearLogs():
+  Promise<void>` delegating to `LogStore.clear()`. Returns structured data only — no file write, no
+  share-sheet call — same "library returns data, host app owns the native save/share flow" split as
+  `ChatExportApi` (8.4). `LogEntry` type exported from `core/types.ts` alongside the rest of the public
+  surface, JSDoc required (CLAUDE.md's JSDoc gate covers `core/types.ts`).
+  **Done 2026-08-11** — `LogLevel`/`LogEntry` in `core/types.ts`; `LogExportApi` in
+  `core/logging/logging.types.ts` (mirrors `ChatExportApi` living in `conversation.types.ts` rather
+  than `types.ts` itself), both re-exported from `core/index.ts`. `LocalAiClient` now also
+  `implements LogExportApi`.
+- [x] **LOG.5 Tests** — unit tests for `minLevel` filtering and the `maxEntries` prune-on-append math;
+  integration test wiring `logging.enabled` through a real `LocalAiClient` (trigger e.g. a
+  `download:failed` or `manifest:invalid` event, assert it round-trips through `exportLogs()`); confirm
+  `logger` (the pluggable callback) actually receives calls now, with a fake logger in the test.
+  **Done 2026-08-11** — `levelMeetsThreshold()` unit-tested directly (`test/unit/logging/log-levels.test.ts`,
+  4 tests); `maxEntries` prune-on-append math covered in the `LogStore` contract suite (5 rows in,
+  `maxEntries: 3`, oldest 2 pruned) rather than duplicated as a separate unit test. 8 new integration
+  tests in `local-ai-client.test.ts`: `logger` fires independent of `logging.enabled`; `exportLogs()`
+  empty until enabled, then round-trips `manifest:updated`; default `minLevel: 'info'` drops
+  `chat:created` (debug) but keeps `manifest:updated` (info); explicit `minLevel: 'error'` keeps only
+  `manifest:invalid`; the `complete()` sync-context error reaches `logger` but not `exportLogs()`
+  (documents the LOG.3 exception above); `since` filtering; `clearLogs()`; and — closing LOG.3's
+  "finding this section also fixes" — `ensureModelReady()` actually emits `download:failed` on a
+  checksum mismatch now.
+- [x] **LOG.6 Docs** — new `docs/guides/logging-and-export.md`: enable `logging` in config → call
+  `exportLogs()` → app-side `JSON.stringify` + `@capacitor/filesystem` `writeFile` to a cache dir +
+  share plugin, wired to a UI button — mirrors the "app owns native UX" split from LOG.4. Add a minimal
+  "Export logs" button to `examples/minimal-capacitor-app/` demonstrating the flow end to end, same
+  treatment 7.6 already gives the rest of the public API. README gets a short mention alongside the
+  existing `logger` config doc.
+  **Done 2026-08-11** — guide covers `config.logger` vs. `config.logging` side by side (the two are
+  independent, easy to conflate) plus `exportLogs()`/`clearLogs()`; added to `docs/guides/README.md`'s
+  index. `examples/minimal-capacitor-app/src/logs.ts` adds `exportLogsToFile()` (writes to
+  `Directory.Cache` via `@capacitor/filesystem`, already an example-app dependency; hands the URI to
+  "whichever share plugin the app already depends on" rather than adding `@capacitor/share` as a new
+  one), wired into `main.ts`'s boot sequence and `local-ai-setup.ts`'s `logging: { enabled: true }`.
+  README gets a `## Logging` section with both config keys side by side.
+
+**Exit criterion:** `pnpm lint`/`typecheck`/`test:unit`/`test:integration`/`test:contract` green;
+`LogStore` contract test passes against `NodeSqliteAdapter` (Capacitor path carries the same
+"unverified without a device" caveat as every other `CapacitorSqliteAdapter` path in this ROADMAP);
+a fake `logger` in an integration test actually receives `debug`/`info`/`warn`/`error` calls (closes
+the dead-stub finding above); `exportLogs()` round-trips a triggered failure event in a real
+`LocalAiClient` without `logging.enabled` needing to be set for the pluggable `logger` callback itself
+to fire. **Status: met** — 222 total tests green (114 unit + 51 integration + 57 contract [47
+pre-existing + 10 new `LogStore`], up from SEC.1-3's 200), `pnpm run lint`/`typecheck`/`build` all clean.
+`LogStore`'s `CapacitorSqliteAdapter` path carries the same "not exercised in this environment" caveat
+as every other Capacitor-adapter claim in this ROADMAP.

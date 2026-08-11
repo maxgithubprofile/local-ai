@@ -14,6 +14,9 @@ import { RuntimeFacade } from '../runtime/runtime-facade.js';
 import { LifecycleManager } from '../runtime/lifecycle-manager.js';
 import { DownloadEngine } from '../download/download-engine.js';
 import { ModelRegistry } from '../registry/model-registry.js';
+import { LogStore } from '../logging/log-store.js';
+import { levelMeetsThreshold } from '../logging/log-levels.js';
+import type { LogExportApi } from '../logging/logging.types.js';
 import {
   ConfigInvalidError,
   DeviceNotEligibleError,
@@ -32,6 +35,8 @@ import type {
   CompletionToken,
   ContextStrategy,
   LocalAiEventMap,
+  LogEntry,
+  LogLevel,
   Unsubscribe,
 } from '../types.js';
 import type {
@@ -69,7 +74,24 @@ export interface LocalAiConfig {
   /** Number of chats' session files `SessionCache` keeps on disk (LRU-evicted) — Phase 8, default `3`. See `docs/decisions.md` #8. */
   sessionCacheSlots?: number;
   ports?: Partial<LocalAiPorts>;
+  /**
+   * Pluggable callback — called for every internal log event regardless of
+   * {@link LocalAiConfig.logging}, TZ §14. Independent of `logging`: this
+   * fires even when persisted logging is off, and `logging.enabled` doesn't
+   * require a `logger` to be set either — see `docs/decisions.md`'s "Local
+   * logging & export" entry.
+   */
   logger?: LocalAiLogger;
+  /**
+   * Opt-in **local, persisted** log store (`LogStore`, `logs` table) a host
+   * app can read back later via {@link LogExportApi.exportLogs} — e.g. an
+   * in-app "export logs" button. Not a TZ §15 phase; see ROADMAP.md's
+   * "Local logging & export" section and `docs/decisions.md`'s entry of the
+   * same name for why this is opt-in/off by default and why `logger` above
+   * doesn't imply this. Default `enabled: false`; when enabled, defaults
+   * are `minLevel: 'info'`, `maxEntries: 5000`.
+   */
+  logging?: { enabled?: boolean; minLevel?: LogLevel; maxEntries?: number };
 }
 
 /** Pluggable no-op-by-default logger — TZ §14 ("без `console.log` в проде библиотеки"). */
@@ -114,8 +136,45 @@ function rejectedCompletionStream<T>(error: Error): CompletionStream<T> {
   return { [Symbol.asyncIterator]: () => emptyAsyncIterable<never>()[Symbol.asyncIterator](), result: Promise.reject(error) };
 }
 
+/** Log level of every `LocalAiEventMap` event, for LOG.3's "hook into emit() so every event logs itself for free" (ROADMAP.md's "Local logging & export" section). */
+const EVENT_LOG_LEVEL: { [E in keyof LocalAiEventMap]: LogLevel } = {
+  'manifest:updated': 'info',
+  'manifest:invalid': 'error',
+  'device:eligibility-warning': 'warn',
+  'download:progress': 'debug',
+  'download:completed': 'info',
+  'download:failed': 'error',
+  'runtime:model-loaded': 'info',
+  'runtime:embedding-loaded': 'info',
+  'runtime:unloaded': 'info',
+  'vector-store:fallback-active': 'warn',
+  'chat-search:fallback-active': 'warn',
+  'vector-store:embedding-changed': 'info',
+  'chat:created': 'debug',
+  'chat:deleted': 'debug',
+  'chat:message-appended': 'debug',
+};
+
+/**
+ * JSON-safe copy of an event payload for `LogStore.append()` — `Error`
+ * instances (e.g. `manifest:invalid`'s `{ error }`, `download:failed`'s
+ * `{ error }`) serialize to `{}` under plain `JSON.stringify` (their
+ * `message`/`name` aren't own-enumerable), so they're unwrapped explicitly
+ * here. The raw payload (with the real `Error` object intact) still goes to
+ * the pluggable `logger` callback unchanged — this sanitizing only applies
+ * to what gets persisted as `meta_json`.
+ */
+function sanitizeLogMeta(payload: unknown): Record<string, unknown> | undefined {
+  if (payload === undefined) return undefined;
+  return JSON.parse(
+    JSON.stringify(payload, (_key, value: unknown) =>
+      value instanceof Error ? { name: value.name, message: value.message } : value,
+    ),
+  ) as Record<string, unknown>;
+}
+
 /** Single public entry point — TZ §10. */
-export class LocalAiClient implements ConversationApi, ConversationSyncApi, ChatSearchApi, ChatExportApi {
+export class LocalAiClient implements ConversationApi, ConversationSyncApi, ChatSearchApi, ChatExportApi, LogExportApi {
   private currentManifest: LocalAiManifest | null = null;
   private modelLoaded = false;
   private embeddingLoaded = false;
@@ -136,6 +195,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
     private readonly runtimeFacade: RuntimeFacade,
     private readonly downloadEngine: DownloadEngine,
     private readonly lifecycleManager: LifecycleManager,
+    private readonly logStore: LogStore,
   ) {}
 
   /** Creates and initializes a client from config + optional port overrides. TZ §10. */
@@ -162,6 +222,10 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
     const runtimeFacade = new RuntimeFacade(ports.llmRuntime);
     const downloadEngine = new DownloadEngine(ports.downloadTransport, ports.fileSystem, ports.hash, ports.sqlite, ports.clock);
     const lifecycleManager = new LifecycleManager(ports.llmRuntime, ports.sqlite);
+    // LOG.2/LOG.3 — always constructed (the `logs` table always exists once
+    // migrated); the opt-in gate is `config.logging?.enabled` at dispatch
+    // time, not at construction.
+    const logStore = new LogStore(ports.sqlite, ports.clock, { maxEntries: config.logging?.maxEntries });
 
     const client = new LocalAiClient(
       config,
@@ -176,6 +240,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
       runtimeFacade,
       downloadEngine,
       lifecycleManager,
+      logStore,
     );
     client.currentManifest = await manifestService.getCachedManifest();
 
@@ -184,14 +249,14 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
     const { store, usedFallback } = await createVectorStore(ports.sqlite, ports.clock);
     client.vectorStore = store;
     if (usedFallback) {
-      client.emit('vector-store:fallback-active', { reason: 'sqlite-vec unavailable or failed its self-test on this device' });
+      await client.emit('vector-store:fallback-active', { reason: 'sqlite-vec unavailable or failed its self-test on this device' });
     }
 
     // Phase 8 — same opportunistic pattern as the vector store above.
     const { index, usedFallback: usedSearchFallback } = await createMessageSearchIndex(ports.sqlite);
     client.messageSearchIndex = index;
     if (usedSearchFallback) {
-      client.emit('chat-search:fallback-active', { reason: 'FTS5 unavailable or failed its self-test on this device' });
+      await client.emit('chat-search:fallback-active', { reason: 'FTS5 unavailable or failed its self-test on this device' });
     }
 
     // TZ §11.2 — opt-in only, default false; never an eager reload on refocus.
@@ -255,12 +320,12 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
     try {
       const { manifest, diff } = await this.manifestService.refresh();
       this.currentManifest = manifest;
-      this.emit('manifest:updated', diff);
+      await this.emit('manifest:updated', diff);
       return diff;
     } catch (err) {
       // TZ §5.2: manifest not accepted -> keep serving the cached one, emit
       // manifest:invalid instead of throwing past this method.
-      this.emit('manifest:invalid', { error: err as Error });
+      await this.emit('manifest:invalid', { error: err as Error });
       const cached = await this.manifestService.getCachedManifest();
       if (!cached) throw err; // nothing to fall back to at all — genuinely can't proceed
       this.currentManifest = cached;
@@ -281,24 +346,66 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
   }
 
   /** TZ §6.4's policy table — `'ignore'` means this verdict is never acted on (no throw, no warn event). */
-  private applyEligibilityPolicy(report: EligibilityReport): void {
+  private async applyEligibilityPolicy(report: EligibilityReport): Promise<void> {
     const policy = this.config.eligibilityPolicy ?? {};
     if (report.verdict === 'no') {
       const action = policy.no ?? 'block';
       if (action === 'ignore') return;
       if (action === 'block') {
-        throw new DeviceNotEligibleError(`device is not eligible: ${report.reasons.join('; ')}`);
+        const message = `device is not eligible: ${report.reasons.join('; ')}`;
+        await this.dispatchLog('error', message); // blocked — no LocalAiEventMap event fires on this path, unlike the warn branch below
+        throw new DeviceNotEligibleError(message);
       }
-      this.emit('device:eligibility-warning', report);
+      await this.emit('device:eligibility-warning', report);
       return;
     }
     if (report.verdict === 'tight' || report.verdict === 'unknown') {
       const action = policy.tight ?? 'warn';
       if (action === 'ignore') return;
       if (action === 'block') {
-        throw new DeviceNotEligibleError(`device eligibility is '${report.verdict}': ${report.reasons.join('; ')}`);
+        const message = `device eligibility is '${report.verdict}': ${report.reasons.join('; ')}`;
+        await this.dispatchLog('error', message);
+        throw new DeviceNotEligibleError(message);
       }
-      this.emit('device:eligibility-warning', report);
+      await this.emit('device:eligibility-warning', report);
+    }
+  }
+
+  /**
+   * Shared wrapper around `DownloadEngine.downloadArtifact()` for every
+   * call site below — emits `download:completed` on success or
+   * `download:failed` on failure (previously declared in `LocalAiEventMap`
+   * but never actually emitted anywhere, LOG.3's "finding this section also
+   * fixes"), then rethrows so each caller's own control flow is unchanged.
+   * `download:failed` logs itself for free via `emit()`'s `EVENT_LOG_LEVEL`
+   * hook — no separate `dispatchLog()` call needed here.
+   */
+  private async downloadArtifactLogged(
+    kind: 'model' | 'embedding',
+    spec: { filename: string; url: string; sha256: string; sizeBytes: number },
+    onProgress?: (p: DownloadProgress) => void,
+  ): Promise<{ destinationPath: string }> {
+    try {
+      const result = await this.downloadEngine.downloadArtifact(
+        { kind, filename: spec.filename, url: spec.url, sha256: spec.sha256, sizeBytes: spec.sizeBytes },
+        {
+          onProgress: (p) => {
+            onProgress?.(p);
+            // Fire-and-forget, deliberately not awaited: this callback is a
+            // sync (void-returning) port contract (DownloadTransportPort's
+            // onProgress). Safe only because emit() never touches LogStore
+            // for 'download:progress' (see emit()'s doc comment) — no
+            // sqlite transaction is ever opened by this call, so there's
+            // nothing for it to race with.
+            void this.emit('download:progress', p);
+          },
+        },
+      );
+      await this.emit('download:completed', { key: result.destinationPath, kind });
+      return result;
+    } catch (err) {
+      await this.emit('download:failed', { key: spec.filename, kind, error: err as Error });
+      throw err;
     }
   }
 
@@ -325,14 +432,14 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
     // Always evaluate — applyEligibilityPolicy() is what decides whether a
     // given verdict actually blocks/warns/is ignored (TZ §6.4's policy is
     // per-verdict, not an all-or-nothing skip).
-    this.applyEligibilityPolicy(await this.checkDeviceEligibility('model'));
+    await this.applyEligibilityPolicy(await this.checkDeviceEligibility('model'));
 
     const artifact = manifest.model;
-    const { destinationPath } = await this.downloadEngine.downloadArtifact(
-      { kind: 'model', filename: artifact.filename, url: resolveArtifactUrl(artifact), sha256: artifact.sha256, sizeBytes: artifact.sizeBytes },
-      { onProgress: (p) => { options?.onProgress?.(p); this.emit('download:progress', p); } },
+    const { destinationPath } = await this.downloadArtifactLogged(
+      'model',
+      { filename: artifact.filename, url: resolveArtifactUrl(artifact), sha256: artifact.sha256, sizeBytes: artifact.sizeBytes },
+      options?.onProgress,
     );
-    this.emit('download:completed', { key: destinationPath, kind: 'model' });
 
     if (!this.modelLoaded) {
       await this.ports.llmRuntime.loadModel({ modelPath: destinationPath, contextLength: artifact.contextLength });
@@ -347,7 +454,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
         sha256: artifact.sha256,
         sizeBytes: artifact.sizeBytes,
       });
-      this.emit('runtime:model-loaded', { modelId: artifact.id, version: artifact.version });
+      await this.emit('runtime:model-loaded', { modelId: artifact.id, version: artifact.version });
     }
   }
 
@@ -362,14 +469,14 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
     const manifest = this.currentManifest!;
 
     const report = await this.checkDeviceEligibility('embedding');
-    this.applyEligibilityPolicy(report);
+    await this.applyEligibilityPolicy(report);
 
     const artifact = manifest.embedding;
-    const { destinationPath } = await this.downloadEngine.downloadArtifact(
-      { kind: 'embedding', filename: artifact.filename, url: resolveArtifactUrl(artifact), sha256: artifact.sha256, sizeBytes: artifact.sizeBytes },
-      { onProgress: (p) => { options?.onProgress?.(p); this.emit('download:progress', p); } },
+    const { destinationPath } = await this.downloadArtifactLogged(
+      'embedding',
+      { filename: artifact.filename, url: resolveArtifactUrl(artifact), sha256: artifact.sha256, sizeBytes: artifact.sizeBytes },
+      options?.onProgress,
     );
-    this.emit('download:completed', { key: destinationPath, kind: 'embedding' });
 
     if (!this.embeddingLoaded) {
       await this.ports.llmRuntime.loadEmbeddingModel({ modelPath: destinationPath });
@@ -382,7 +489,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
         sizeBytes: artifact.sizeBytes,
         dimensions: artifact.dimensions,
       });
-      this.emit('runtime:embedding-loaded', { embeddingId: artifact.id, version: artifact.version });
+      await this.emit('runtime:embedding-loaded', { embeddingId: artifact.id, version: artifact.version });
     }
   }
 
@@ -406,18 +513,18 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
     await this.ensureManifestLoaded();
     const artifact = this.currentManifest!.model;
 
-    this.applyEligibilityPolicy(await this.checkDeviceEligibility('model')); // step 1
+    await this.applyEligibilityPolicy(await this.checkDeviceEligibility('model')); // step 1
 
-    const { destinationPath } = await this.downloadEngine.downloadArtifact(
-      // steps 2-3 — DownloadEngine verifies sha256 itself before resolving
-      { kind: 'model', filename: artifact.filename, url: resolveArtifactUrl(artifact), sha256: artifact.sha256, sizeBytes: artifact.sizeBytes },
-      { onProgress: (p) => { options?.onProgress?.(p); this.emit('download:progress', p); } },
+    // steps 2-3 — DownloadEngine verifies sha256 itself before resolving
+    const { destinationPath } = await this.downloadArtifactLogged(
+      'model',
+      { filename: artifact.filename, url: resolveArtifactUrl(artifact), sha256: artifact.sha256, sizeBytes: artifact.sizeBytes },
+      options?.onProgress,
     );
-    this.emit('download:completed', { key: destinationPath, kind: 'model' });
 
     await this.ports.llmRuntime.releaseModel(); // step 4 — LLM context only, embedding context untouched
     this.modelLoaded = false;
-    this.emit('runtime:unloaded', { reason: 'model-switch' });
+    await this.emit('runtime:unloaded', { reason: 'model-switch' });
 
     const { previous } = await this.modelRegistry.setCurrent('model', {
       id: artifact.id,
@@ -436,7 +543,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
 
     await this.ports.llmRuntime.loadModel({ modelPath: destinationPath, contextLength: artifact.contextLength });
     this.modelLoaded = true;
-    this.emit('runtime:model-loaded', { modelId: artifact.id, version: artifact.version });
+    await this.emit('runtime:model-loaded', { modelId: artifact.id, version: artifact.version });
   }
 
   /**
@@ -453,19 +560,19 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
     await this.ensureManifestLoaded();
     const artifact = this.currentManifest!.embedding;
 
-    this.applyEligibilityPolicy(await this.checkDeviceEligibility('embedding'));
+    await this.applyEligibilityPolicy(await this.checkDeviceEligibility('embedding'));
 
-    const { destinationPath } = await this.downloadEngine.downloadArtifact(
-      { kind: 'embedding', filename: artifact.filename, url: resolveArtifactUrl(artifact), sha256: artifact.sha256, sizeBytes: artifact.sizeBytes },
-      { onProgress: (p) => { options?.onProgress?.(p); this.emit('download:progress', p); } },
+    const { destinationPath } = await this.downloadArtifactLogged(
+      'embedding',
+      { filename: artifact.filename, url: resolveArtifactUrl(artifact), sha256: artifact.sha256, sizeBytes: artifact.sizeBytes },
+      options?.onProgress,
     );
-    this.emit('download:completed', { key: destinationPath, kind: 'embedding' });
 
     const previousArtifact = await this.modelRegistry.getCurrent('embedding');
 
     await this.ports.llmRuntime.releaseEmbeddingModel();
     this.embeddingLoaded = false;
-    this.emit('runtime:unloaded', { reason: 'embedding-switch' });
+    await this.emit('runtime:unloaded', { reason: 'embedding-switch' });
 
     const { previous } = await this.modelRegistry.setCurrent('embedding', {
       id: artifact.id,
@@ -480,7 +587,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
       await this.ports.fileSystem.deleteFile(this.ports.fileSystem.resolvePath('embeddings', previous.filename)).catch(() => undefined);
     }
 
-    this.emit('vector-store:embedding-changed', {
+    await this.emit('vector-store:embedding-changed', {
       previous: previousArtifact
         ? { id: previousArtifact.id, version: previousArtifact.version, dimensions: previousArtifact.dimensions ?? 0 }
         : undefined,
@@ -490,7 +597,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
 
     await this.ports.llmRuntime.loadEmbeddingModel({ modelPath: destinationPath });
     this.embeddingLoaded = true;
-    this.emit('runtime:embedding-loaded', { embeddingId: artifact.id, version: artifact.version });
+    await this.emit('runtime:embedding-loaded', { embeddingId: artifact.id, version: artifact.version });
   }
 
   /**
@@ -504,7 +611,9 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
    */
   complete(input: CompletionInput, signal?: AbortSignal): CompletionStream<CompletionResult> {
     if (!this.modelLoaded || !this.currentManifest) {
-      return rejectedCompletionStream(new RuntimeInitError('call ensureModelReady() before complete()'));
+      const message = 'call ensureModelReady() before complete()';
+      this.config.logger?.error(message); // complete() must return CompletionStream synchronously — can't await dispatchLog()'s LogStore write here, so this bypasses the persisted store (logger callback only)
+      return rejectedCompletionStream(new RuntimeInitError(message));
     }
     return this.runtimeFacade.complete(input, { chatTemplate: this.currentManifest.model.chatTemplate }, signal);
   }
@@ -516,7 +625,9 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
    */
   async embed(text: string | string[]): Promise<Float32Array | Float32Array[]> {
     if (!this.embeddingLoaded) {
-      throw new RuntimeInitError('call ensureEmbeddingReady() before embed()');
+      const message = 'call ensureEmbeddingReady() before embed()';
+      this.config.logger?.error(message); // same sync-context caveat as complete() above
+      throw new RuntimeInitError(message);
     }
     return this.ports.llmRuntime.embed(text);
   }
@@ -533,7 +644,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
     metadata?: Record<string, unknown>;
   }): Promise<Chat> {
     const chat = await this.conversationStore.createChat(options);
-    this.emit('chat:created', { chatId: chat.id });
+    await this.emit('chat:created', { chatId: chat.id });
     return chat;
   }
 
@@ -556,7 +667,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
   async deleteChat(chatId: string): Promise<void> {
     await this.conversationStore.deleteChat(chatId);
     await this.sessionCache.deleteForChat(chatId); // the other half of TZ §9.2's cascade — SQL + session file
-    this.emit('chat:deleted', { chatId });
+    await this.emit('chat:deleted', { chatId });
   }
 
   /** Returns a chat's full stored message history, oldest first, unaffected by any context-window truncation applied during generation (TZ §9.7). */
@@ -587,7 +698,9 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
     },
   ): CompletionStream<ChatMessage> {
     if (!this.modelLoaded || !this.currentManifest) {
-      return rejectedCompletionStream(new RuntimeInitError('call ensureModelReady() before sendMessage()'));
+      const message = 'call ensureModelReady() before sendMessage()';
+      this.config.logger?.error(message); // sendMessage() must return CompletionStream synchronously too — same caveat as complete()
+      return rejectedCompletionStream(new RuntimeInitError(message));
     }
     const manifest = this.currentManifest;
     const userMessageId = options?.userMessageId ?? globalThis.crypto.randomUUID();
@@ -604,7 +717,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
         status: 'complete',
         createdAt: userCreatedAt,
       });
-      this.emit('chat:message-appended', { chatId, messageId: userMessageId, role: 'user' });
+      await this.emit('chat:message-appended', { chatId, messageId: userMessageId, role: 'user' });
 
       // Build the context window from the full persisted history (which now includes the message just saved).
       const history = await this.conversationStore.getMessages(chatId);
@@ -658,7 +771,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
         tokenCount: completion.tokenCount,
       };
       await this.conversationStore.addMessage(chatId, assistantMessage);
-      this.emit('chat:message-appended', { chatId, messageId: assistantMessageId, role: 'assistant' });
+      await this.emit('chat:message-appended', { chatId, messageId: assistantMessageId, role: 'assistant' });
 
       if (completion.status === 'complete') {
         await this.sessionCache.save(chatId, modelFingerprint).catch(() => undefined); // best-effort, TZ §9.3 step 4
@@ -699,7 +812,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
   ): Promise<{ inserted: number; skippedExisting: number }> {
     const result = await this.conversationStore.appendMessages(chatId, messages);
     for (const m of messages) {
-      this.emit('chat:message-appended', { chatId, messageId: m.id, role: m.role });
+      await this.emit('chat:message-appended', { chatId, messageId: m.id, role: m.role });
     }
     return result;
   }
@@ -728,7 +841,11 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
 
   /** Full-text search across one or all chats (TZ §9.5's "can build FTS5 if needed" note, Phase 8). Backed by real FTS5 when available, a `LIKE` scan otherwise — see `chat-search:fallback-active`. */
   async searchMessages(query: string, options?: { chatId?: string; limit?: number }): Promise<ChatSearchHit[]> {
-    if (!this.messageSearchIndex) throw new RuntimeInitError('search index not initialized — this should never happen after create()');
+    if (!this.messageSearchIndex) {
+      const message = 'search index not initialized — this should never happen after create()';
+      this.config.logger?.error(message); // defensive-only guard ("should never happen after create()") — logger callback only, see emit()'s doc comment
+      throw new RuntimeInitError(message);
+    }
     return this.messageSearchIndex.search(query, options);
   }
 
@@ -742,17 +859,40 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
     return this.conversationStore.exportChats(options);
   }
 
+  // --- LogExportApi (ROADMAP.md's "Local logging & export" section, no TZ section) ---
+
+  /**
+   * Reads persisted log entries captured while `LocalAiConfig.logging.enabled`
+   * was `true` (LOG.4). `options.since` is converted to the ISO string
+   * `LogStore` stores `ts` as; `options.level` is a minimum-severity
+   * threshold, not an exact match — see `LogStore.query()`.
+   */
+  async exportLogs(options?: { since?: Date; level?: LogLevel; limit?: number }): Promise<LogEntry[]> {
+    return this.logStore.query({ since: options?.since?.toISOString(), level: options?.level, limit: options?.limit });
+  }
+
+  /** Deletes every persisted log entry (LOG.4). Does not affect the pluggable `logger` callback, which isn't stateful. */
+  async clearLogs(): Promise<void> {
+    await this.logStore.clear();
+  }
+
   /** The active embedding's `VectorSpaceDescriptor` — throws if no manifest/embedding is known yet. */
   private activeVectorSpace(): VectorSpaceDescriptor {
     if (!this.currentManifest) {
-      throw new RuntimeInitError('no manifest loaded yet — call refreshManifest()/ensureEmbeddingReady() first');
+      const message = 'no manifest loaded yet — call refreshManifest()/ensureEmbeddingReady() first';
+      this.config.logger?.error(message); // synchronous getter/method — logger callback only, same reasoning as complete()/sendMessage() above
+      throw new RuntimeInitError(message);
     }
     const embedding = this.currentManifest.embedding;
     return { embeddingId: embedding.id, embeddingVersion: embedding.version, dimensions: embedding.dimensions };
   }
 
   private get vectorStoreOrThrow(): VectorStore {
-    if (!this.vectorStore) throw new RuntimeInitError('vector store not initialized — this should never happen after create()');
+    if (!this.vectorStore) {
+      const message = 'vector store not initialized — this should never happen after create()';
+      this.config.logger?.error(message); // synchronous getter — logger callback only
+      throw new RuntimeInitError(message);
+    }
     return this.vectorStore;
   }
 
@@ -811,7 +951,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
     this.embeddingLoaded = false;
     this.currentManifest = null; // in-memory only — still recoverable from kv_store via getCachedManifest()
     this.sessionCache.resetHotHandle();
-    this.emit('runtime:unloaded', { reason });
+    await this.emit('runtime:unloaded', { reason });
   }
 
   /** @deprecated Use {@link releaseRuntime} — same method, TZ §11.0 explains the rename. */
@@ -849,10 +989,64 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
     return () => set!.delete(handler as (payload: never) => void);
   }
 
-  private emit<E extends keyof LocalAiEventMap>(event: E, payload: LocalAiEventMap[E]): void {
+  /**
+   * `Promise<void>`, not `void` — every caller `await`s this (see the sed'd
+   * `await this.emit(...)` call sites throughout this class). That's
+   * deliberate, not incidental: `dispatchLog()` below opens a `LogStore`
+   * transaction on the *same* shared `SqlitePort` connection every other
+   * method in this class uses, and `NodeSqliteAdapter`/`CapacitorSqliteAdapter`
+   * have no internal queue — two overlapping, un-awaited `transaction()`
+   * calls on one connection throw "cannot start a transaction within a
+   * transaction". Awaiting `emit()` end-to-end is what keeps LOG.3's
+   * "every event logs itself for free" from corrupting whatever `await
+   * this.conversationStore.xyz(...)` runs immediately after it in the
+   * caller. The one exception is `download:progress` (see below).
+   */
+  private async emit<E extends keyof LocalAiEventMap>(event: E, payload: LocalAiEventMap[E]): Promise<void> {
+    // LOG.3 — every LocalAiEventMap event logs itself for free through this
+    // single choke point, at the severity in EVENT_LOG_LEVEL — except
+    // 'download:progress', which fires at high frequency during a single
+    // download (would blow through logging.maxEntries almost instantly and
+    // evict everything else) and is the one event fired from a genuinely
+    // synchronous, non-`await`-able callback context
+    // (`DownloadTransportPort`'s `onProgress: (p) => void`). Skipping
+    // LogStore entirely for it means that fire-and-forget call site never
+    // opens a transaction, so it's safe to leave un-awaited there. The
+    // pluggable `logger` callback still receives it either way.
+    if (event === 'download:progress') {
+      this.config.logger?.debug(event, payload as unknown as Record<string, unknown>);
+    } else {
+      await this.dispatchLog(EVENT_LOG_LEVEL[event], event, payload as unknown as Record<string, unknown>);
+    }
     const set = this.listeners.get(event);
     if (!set) return;
     for (const handler of set) (handler as (payload: LocalAiEventMap[E]) => void)(payload);
+  }
+
+  /**
+   * LOG.3's internal log-dispatch helper — (a) always calls `config.logger`
+   * if supplied, with the raw `meta` (may contain a real `Error`, fine for
+   * an in-process callback); (b) additionally appends to `LogStore` when
+   * `config.logging.enabled` and `level` meets `config.logging.minLevel`
+   * (default `'info'`), with `meta` sanitized to a JSON-safe shape first.
+   * Never throws — a logging failure must never break the caller that
+   * triggered it. Only ever called from an already-`async` context that can
+   * safely `await` it (see {@link emit}'s doc comment on why this can't be
+   * fire-and-forget); the handful of throw sites on genuinely synchronous
+   * methods (`complete()`, `sendMessage()`'s pre-check, the defensive
+   * "should never happen after create()" guards) call `config.logger`
+   * directly instead of going through here, for the same reason.
+   */
+  private async dispatchLog(level: LogLevel, message: string, meta?: Record<string, unknown>): Promise<void> {
+    this.config.logger?.[level](message, meta);
+    const logging = this.config.logging;
+    if (!logging?.enabled) return;
+    if (!levelMeetsThreshold(level, logging.minLevel ?? 'info')) return;
+    try {
+      await this.logStore.append({ level, message, meta: sanitizeLogMeta(meta) });
+    } catch {
+      // best-effort — a persisted-logging failure must never break the caller.
+    }
   }
 
   /**

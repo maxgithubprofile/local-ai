@@ -20,6 +20,7 @@ repo), not to be a CI-buildable app.
 | 2+ independent chats (Mode A), `RuntimeBusyError`/cancellation handling | [`src/chats.ts`](./src/chats.ts) |
 | One chat running in Mode B (`upsertChat`/`appendMessages`, host-app-owned history) | [`src/mode-b-chat.ts`](./src/mode-b-chat.ts) |
 | Independent embedding update (`switchEmbedding()`, `vector-store:embedding-changed`) | [`src/embedding-update.ts`](./src/embedding-update.ts) |
+| "Export logs" button (`config.logging`, `exportLogs()`) | [`src/logs.ts`](./src/logs.ts) |
 | Wiring order at app boot | [`src/main.ts`](./src/main.ts) |
 
 Each file's own doc comment cross-references the TZ section and the matching guide under

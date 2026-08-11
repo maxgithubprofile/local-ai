@@ -38,6 +38,7 @@ export function getClient(): Promise<LocalAiClient> {
       manifestUrl: 'https://example.com/local-ai-manifest.json', // replace with your own hosted manifest
       eligibilityPolicy: { no: 'block', tight: 'warn' },
       autoUnloadOnBackground: true, // this example app prioritizes memory over latency on refocus
+      logging: { enabled: true }, // powers logs.ts's "export logs" button — see docs/guides/logging-and-export.md
       ports,
     });
   }

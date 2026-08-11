@@ -7,6 +7,7 @@ import { checkAppCanRun } from './eligibility-screen.js';
 import { bootstrapChats } from './chats.js';
 import { bootstrapModeBChat } from './mode-b-chat.js';
 import { checkForEmbeddingUpdate } from './embedding-update.js';
+import { exportLogsToFile } from './logs.js';
 
 async function main(): Promise<void> {
   const unsupported = await checkAppCanRun();
@@ -19,6 +20,7 @@ async function main(): Promise<void> {
   await bootstrapChats(); // 2+ chats, Mode A
   await bootstrapModeBChat(); // Mode B — host-app-owned history
   await checkForEmbeddingUpdate(); // independent embedding update
+  await exportLogsToFile(); // stand-in for a settings screen's "Export logs" button — docs/guides/logging-and-export.md
 }
 
 main().catch((err) => console.error('minimal-capacitor-app failed:', err));

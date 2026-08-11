@@ -8,12 +8,16 @@ downloads, a local SQLite database (chats + vector search), device/platform elig
 managed memory lifecycle — no UI, no personas, no RAG orchestration. Full spec:
 [`docs/2026-08-10-local-ai-library-tz.md`](./docs/2026-08-10-local-ai-library-tz.md).
 
-Status: **Phases 0–6 implemented and tested** (spikes/ADRs, manifest, support/eligibility, downloads,
-SQL/vectors/chats, LLM runtime + facade, session-cache/context-policy/message send, lifecycle) — see
-[`ROADMAP.md`](./ROADMAP.md) for what's done vs. still open, and each phase's status note for what is
-and isn't verified from a device-less dev environment (a handful of Capacitor-only adapters are
-implemented against each native plugin's real, confirmed API but can't be executed without a physical
-Android/iOS device or emulator — flagged explicitly where that applies).
+Status: **Phases 0–7 implemented and tested**, plus most of Phase 8's post-v1 scope, a 2026-08-11
+security-hardening pass, and a 2026-08-11 "Local logging & export" addition (spikes/ADRs, manifest,
+support/eligibility, downloads, SQL/vectors/chats, LLM runtime + facade, session-cache/context-policy/
+message send, lifecycle, docs/JSDoc/TypeDoc, full-text search, export/backup, `updateMessage`/
+`deleteMessages`, manifest-URL/storage/checksum hardening, a persisted local log store) — see
+[`ROADMAP.md`](./ROADMAP.md) for what's done vs. still open (message branching, Phase 8's one declined
+item, is the only scoped-and-skipped post-v1 item), and each phase's status note for what is and isn't
+verified from a device-less dev environment (a handful of Capacitor-only adapters are implemented
+against each native plugin's real, confirmed API but can't be executed without a physical Android/iOS
+device or emulator — flagged explicitly where that applies).
 
 ## Quickstart
 
@@ -95,7 +99,7 @@ hosts.
 | [`ROADMAP.md`](./ROADMAP.md) | TZ §15 phases broken into agent-sized, checkable tasks, each with a status note. |
 | [`docs/decisions.md`](./docs/decisions.md) | Ledger of TZ §16 open questions and their resolutions, plus implementation/tooling notes. |
 | [`docs/adr/`](./docs/adr/) | Architecture Decision Records, one per Phase 0 spike / major choice. |
-| [`docs/guides/`](./docs/guides/) | Task-oriented guides (first run, eligibility, multi-chat, Mode B, lifecycle, manifest format, testing). |
+| [`docs/guides/`](./docs/guides/) | Task-oriented guides (first run, eligibility, multi-chat, Mode B, lifecycle, manifest format, testing, logging & export). |
 | [`CLAUDE.md`](./CLAUDE.md) | Project rules for agentic development in this repo. |
 | [`src/core/`](./src/core/) | Platform-free business logic + the 9 ports (TZ §3). |
 | [`src/adapters/capacitor/`](./src/adapters/capacitor/) | Production adapters over real Capacitor/Capgo plugins. |
@@ -106,6 +110,24 @@ hosts.
 (`AsyncTokenQueue`, the callback→`AsyncIterable` bridge used by both LLM runtime adapters, lives under
 `src/core/utils/` instead — `LocalAiClient.sendMessage()` needed to reuse it too, and `core/**` cannot
 import from `adapters/**` even the shared ones, hexagonal boundary.)
+
+## Logging
+
+```ts
+const client = await LocalAiClient.create({
+  manifestUrl,
+  ports,
+  logger: { debug: console.debug, info: console.info, warn: console.warn, error: console.error }, // TZ §14, no-op by default
+  logging: { enabled: true }, // opt-in persisted store — off by default; see docs/decisions.md
+});
+
+const recent = await client.exportLogs({ limit: 100 });
+await client.clearLogs();
+```
+
+`logger` is a pluggable, no-op-by-default callback (TZ §14); `logging` is a separate, opt-in local
+SQLite-backed store a host app can read back later (e.g. an "export logs" button) — the two are
+independent. See [`docs/guides/logging-and-export.md`](./docs/guides/logging-and-export.md).
 
 ## Platform support
 
@@ -118,8 +140,9 @@ library, since `sql`/`download` can still work on web depending on which plugins
 
 This repo was built and tested in an environment with no physical Android/iOS device or emulator.
 Everything under `src/core/**` and the Node-side adapters is exercised by real, passing automated
-tests (`pnpm test` / `pnpm run test:contract` — 160+ tests as of Phase 6, unit + integration + contract,
-including real GGUF inference via `node-llama-cpp` against a tiny fixture model, not mocks). The
+tests (`pnpm test` / `pnpm run test:contract` — 222 tests as of the "Local logging & export" addition,
+unit + integration + contract, including real GGUF inference via `node-llama-cpp` against a tiny
+fixture model, not mocks). The
 Capacitor production adapters (`src/adapters/capacitor/**`) are implemented against each plugin's real,
 installed `.d.ts`/native source — not README guesses — but their actual on-device behavior is
 unverified. `docs/adr/` documents exactly which spikes are `accepted` (desk-verifiable, e.g. plugin

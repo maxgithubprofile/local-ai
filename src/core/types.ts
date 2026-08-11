@@ -78,5 +78,30 @@ export interface LocalAiEventMap {
 /** Context-window handling strategy when a chat's history exceeds `maxContextTokens` — TZ §9.7. */
 export type ContextStrategy = 'fail' | 'truncate-oldest' | 'truncate-to-fit';
 
+/**
+ * Severity of a log entry — shared by the pluggable {@link LocalAiLogger}
+ * callback (TZ §14) and the persisted `LogStore` (ROADMAP.md's "Local
+ * logging & export" section, not a TZ concept). Ordered `debug` < `info` <
+ * `warn` < `error`; `LocalAiConfig.logging.minLevel` and `exportLogs()`'s
+ * `level` filter both compare against this order, not exact equality.
+ */
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+/**
+ * One persisted log row, as returned by `LocalAiClient.exportLogs()` — see
+ * `docs/guides/logging-and-export.md`. Only ever produced when
+ * `LocalAiConfig.logging.enabled` was `true` at the time the entry was
+ * captured; `id` is the row's autoincrement primary key, useful for a
+ * consumer that wants to dedupe across repeated exports.
+ */
+export interface LogEntry {
+  id: number;
+  /** ISO-8601 timestamp, same convention as every other `*_at` field in this package's public types. */
+  ts: string;
+  level: LogLevel;
+  message: string;
+  meta?: Record<string, unknown>;
+}
+
 /** `Unsubscribe` handles returned by `on()`/port event registrations. */
 export type Unsubscribe = () => void;

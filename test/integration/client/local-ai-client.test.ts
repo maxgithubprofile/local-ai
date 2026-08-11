@@ -15,7 +15,13 @@ import { NodeSqliteAdapter } from '../../../src/adapters/node-testing/node-sqlit
 import { NodeRangeDownloadAdapter } from '../../../src/adapters/node-testing/node-range-download.adapter.js';
 import { WebCryptoHashAdapter } from '../../../src/adapters/shared/web-crypto-hash.adapter.js';
 import { createMockDownloadServer } from '../download/mock-http-server.js';
-import { ConfigInvalidError, DeviceNotEligibleError, MessageNotFoundError, RuntimeInitError } from '../../../src/core/errors.js';
+import {
+  ChecksumMismatchError,
+  ConfigInvalidError,
+  DeviceNotEligibleError,
+  MessageNotFoundError,
+  RuntimeInitError,
+} from '../../../src/core/errors.js';
 import type { DeviceSnapshot } from '../../../src/core/support/types.js';
 
 const realFetch = globalThis.fetch;
@@ -626,6 +632,139 @@ describe('LocalAiClient', () => {
     appLifecycle.setActive(true); // refocus — TZ §11.2: no eager reload
     await Promise.resolve();
     expect(llmRuntime.modelLoaded).toBe(false);
+  });
+
+  it('ensureModelReady() emits download:failed on a checksum mismatch (previously declared but never emitted, LOG.3)', async () => {
+    const v2Body = manifestBody();
+    v2Body.model.sha256 = 'a'.repeat(64); // deliberately wrong — never matches MODEL_BYTES' real hash
+    stubManifest(v2Body);
+    const client = await LocalAiClient.create({ manifestUrl, ports });
+    await client.refreshManifest();
+
+    let failedEvent: { key: string; kind: string; error: Error } | undefined;
+    client.on('download:failed', (e) => {
+      failedEvent = e;
+    });
+
+    await expect(client.ensureModelReady()).rejects.toThrow(ChecksumMismatchError);
+
+    expect(failedEvent?.kind).toBe('model');
+    expect(failedEvent?.error).toBeInstanceOf(ChecksumMismatchError);
+  });
+
+  // --- config.logging / exportLogs() / config.logger (LOG.3/LOG.4, ROADMAP.md "Local logging & export") ---
+
+  it('config.logger receives calls for every LocalAiEventMap event, independent of config.logging', async () => {
+    const calls: Array<{ level: string; message: string }> = [];
+    const logger = {
+      debug: (message: string) => calls.push({ level: 'debug', message }),
+      info: (message: string) => calls.push({ level: 'info', message }),
+      warn: (message: string) => calls.push({ level: 'warn', message }),
+      error: (message: string) => calls.push({ level: 'error', message }),
+    };
+    // logging (the persisted store) is deliberately NOT enabled here — the
+    // pluggable logger callback must fire regardless (docs/decisions.md).
+    const client = await LocalAiClient.create({ manifestUrl, ports, logger });
+
+    await client.createChat(); // emits chat:created -> debug
+
+    expect(calls).toContainEqual({ level: 'debug', message: 'chat:created' });
+    expect(await client.exportLogs()).toEqual([]); // logging.enabled unset -> nothing persisted regardless
+  });
+
+  it('exportLogs() is empty until logging.enabled is true, then round-trips a triggered event', async () => {
+    const client = await LocalAiClient.create({ manifestUrl, ports, logging: { enabled: true } });
+
+    await client.refreshManifest(); // emits manifest:updated -> info, meets the default minLevel: 'info'
+
+    const logs = await client.exportLogs();
+    expect(logs.some((l) => l.level === 'info' && l.message === 'manifest:updated')).toBe(true);
+  });
+
+  it('logging.enabled without an explicit minLevel defaults to "info" — debug-level events are not persisted', async () => {
+    const client = await LocalAiClient.create({ manifestUrl, ports, logging: { enabled: true } });
+
+    await client.createChat(); // chat:created -> debug, below the default minLevel
+    await client.refreshManifest(); // manifest:updated -> info, meets it
+
+    const logs = await client.exportLogs();
+    expect(logs.some((l) => l.message === 'chat:created')).toBe(false);
+    expect(logs.some((l) => l.message === 'manifest:updated')).toBe(true);
+  });
+
+  it('logging.minLevel raises the bar — only entries at or above it are persisted', async () => {
+    const client = await LocalAiClient.create({ manifestUrl, ports, logging: { enabled: true, minLevel: 'error' } });
+    await client.refreshManifest(); // manifest:updated -> info, caches a valid manifest first
+
+    const invalidBody = manifestBody();
+    invalidBody.model.source.revision = 'main';
+    stubManifest(invalidBody);
+    await client.refreshManifest(); // fails validation -> emits manifest:invalid -> error, meets minLevel: 'error'
+
+    const logs = await client.exportLogs();
+    expect(logs.every((l) => l.level === 'error')).toBe(true);
+    expect(logs.some((l) => l.message === 'manifest:invalid')).toBe(true);
+    expect(logs.some((l) => l.message === 'manifest:updated')).toBe(false); // info, below minLevel
+  });
+
+  it('a RuntimeInitError thrown with no corresponding LocalAiEventMap event still reaches config.logger', async () => {
+    // complete() must return a CompletionStream synchronously (TZ §10.0 —
+    // no async escape hatch), so it can't safely await a LogStore write
+    // (see emit()'s doc comment on the "cannot start a transaction within a
+    // transaction" risk that would create) — this path reaches the
+    // pluggable logger callback only, not the persisted store.
+    const calls: Array<{ level: string; message: string }> = [];
+    const logger = {
+      debug: () => {},
+      info: () => {},
+      warn: () => {},
+      error: (message: string) => calls.push({ level: 'error', message }),
+    };
+    const client = await LocalAiClient.create({ manifestUrl, ports, logger, logging: { enabled: true } });
+
+    const stream = client.complete({ messages: [{ role: 'user', content: 'hi' }] });
+    await expect(stream.result).rejects.toThrow(RuntimeInitError);
+
+    expect(calls.some((c) => c.message.includes('ensureModelReady'))).toBe(true);
+    const logs = await client.exportLogs();
+    expect(logs.some((l) => l.message.includes('ensureModelReady'))).toBe(false); // not persisted — see the comment above
+  });
+
+  it('exportLogs({ since }) only returns entries at or after the given Date', async () => {
+    const clock = ports.clock as FakeClockAdapter;
+    const client = await LocalAiClient.create({ manifestUrl, ports, logging: { enabled: true } });
+    await client.refreshManifest(); // manifest:updated, before the cutoff
+
+    clock.advance(60_000);
+    const cutoff = clock.now();
+    clock.advance(1000);
+    await client.createChat(); // chat:created is debug (filtered by minLevel), so trigger another info-level event
+    const invalidBody = manifestBody();
+    invalidBody.model.source.revision = 'main';
+    stubManifest(invalidBody);
+    await client.refreshManifest(); // manifest:invalid, after the cutoff
+
+    const logs = await client.exportLogs({ since: cutoff });
+    expect(logs.every((l) => l.message !== 'manifest:updated' || new Date(l.ts) >= cutoff)).toBe(true);
+    expect(logs.some((l) => l.message === 'manifest:invalid')).toBe(true);
+  });
+
+  it('clearLogs() empties the persisted store without affecting the config.logger callback', async () => {
+    let loggerCalls = 0;
+    const logger = {
+      debug: () => { loggerCalls += 1; },
+      info: () => { loggerCalls += 1; },
+      warn: () => { loggerCalls += 1; },
+      error: () => { loggerCalls += 1; },
+    };
+    const client = await LocalAiClient.create({ manifestUrl, ports, logger, logging: { enabled: true } });
+    await client.refreshManifest();
+    expect(await client.exportLogs()).not.toEqual([]);
+
+    await client.clearLogs();
+
+    expect(await client.exportLogs()).toEqual([]);
+    expect(loggerCalls).toBeGreaterThan(0); // clearLogs() only clears the persisted store, not the callback's past behavior
   });
 
   it('destroy() releases the runtime, closes the database, and clears event listeners', async () => {

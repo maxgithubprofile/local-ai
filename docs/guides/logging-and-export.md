@@ -1,0 +1,90 @@
+# Logging and export
+
+Not a TZ §15 phase — TZ §14 only specifies a pass-through `logger?: LocalAiLogger` callback, no-op by
+default. This guide covers that callback plus the separate, opt-in **persisted** log store added
+2026-08-11 (ROADMAP.md's "Local logging & export" section; reasoning in `docs/decisions.md`'s entry
+of the same name). The two are independent — read both halves below before assuming one implies the
+other.
+
+## `config.logger` — the pluggable callback
+
+```ts
+const client = await LocalAiClient.create({
+  manifestUrl,
+  ports,
+  logger: {
+    debug: (message, meta) => myLogger.debug(message, meta),
+    info: (message, meta) => myLogger.info(message, meta),
+    warn: (message, meta) => myLogger.warn(message, meta),
+    error: (message, meta) => myLogger.error(message, meta),
+  },
+});
+```
+
+No-op by default (TZ §14 — never `console.log` in the library's production code). When supplied, it's
+called for **every** `LocalAiEventMap` event `local-ai` emits internally (`manifest:invalid`,
+`download:failed`, `device:eligibility-warning`, `runtime:*`, `vector-store:fallback-active`,
+`chat-search:fallback-active`, …) plus a handful of `RuntimeInitError`/`DeviceNotEligibleError` sites
+that throw without a corresponding event. `message` is the event name (or a short description for the
+non-event sites); `meta` is the event payload, with the real `Error` object intact where relevant — no
+JSON-safety constraint here, it's an in-process function call. This fires **regardless of whether
+`config.logging` (below) is set** — the callback and the persisted store are independent features.
+
+## `config.logging` — the persisted log store
+
+```ts
+const client = await LocalAiClient.create({
+  manifestUrl,
+  ports,
+  logging: { enabled: true, minLevel: 'info', maxEntries: 5000 }, // defaults shown explicitly
+});
+```
+
+Off by default (`enabled: false`) — this was a deliberate opt-in choice, not a `logger`-style
+no-op-until-configured default; see `docs/decisions.md` for why. When enabled, every internal log
+event at or above `minLevel` is appended to a local SQLite table (`logs`, `LogStore`), bounded to the
+most recent `maxEntries` rows (oldest pruned automatically on each write — never grows unbounded).
+
+`minLevel` is a severity **threshold**, not an exact match: `'warn'` keeps `warn` and `error` entries,
+drops `debug`/`info`. Same rule applies to `exportLogs()`'s `level` filter below.
+
+One event — `download:progress` — never reaches the persisted store even with `minLevel: 'debug'`. It
+fires many times per download; persisting every tick would blow through `maxEntries` almost instantly
+and evict everything else. The `logger` callback above still receives it.
+
+## Reading it back — `exportLogs()` / `clearLogs()`
+
+```ts
+const recent = await client.exportLogs({ limit: 100 });
+const errorsOnly = await client.exportLogs({ level: 'error' });
+const sinceYesterday = await client.exportLogs({ since: new Date(Date.now() - 24 * 60 * 60 * 1000) });
+
+await client.clearLogs(); // wipes the persisted store; does not affect the logger callback
+```
+
+`exportLogs()` returns plain `LogEntry[]` objects (`{ id, ts, level, message, meta? }`), oldest first.
+Like `exportChat()`/`exportChats()` (Phase 8), this is deliberately **data only** — no file write, no
+share-sheet call from inside the library. The host app decides how to turn it into a file and hand it
+to a native save/share flow; `local-ai` has no opinion on native share UX (hexagonal boundary,
+CLAUDE.md).
+
+## Wiring an "Export logs" button
+
+```ts
+import { Filesystem, Directory } from '@capacitor/filesystem';
+import { Share } from '@capacitor/share'; // or whichever share plugin the app already uses
+
+async function exportLogsToFile() {
+  const entries = await client.exportLogs();
+  const json = JSON.stringify(entries, null, 2);
+  const { uri } = await Filesystem.writeFile({
+    path: `local-ai-logs-${Date.now()}.json`,
+    data: json,
+    directory: Directory.Cache,
+    encoding: 'utf8',
+  });
+  await Share.share({ url: uri, title: 'local-ai logs' });
+}
+```
+
+See `examples/minimal-capacitor-app/` for this wired to an actual button.

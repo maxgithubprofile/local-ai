@@ -136,6 +136,58 @@ eligibility policy.
 under `test/contract/`, following the `new-port` skill's symmetry checklist even though this extends an
 existing port.
 
+## Local logging & export (2026-08-11, requested)
+
+Not a TZ §16 row — TZ §14 only specifies a pass-through `logger?: LocalAiLogger` config (no-op by
+default, "no `console.log` in the library's production code"). That interface exists
+(`local-ai-client.ts`) but was never actually wired to anything — a `grep 'logger\.'` over `src/`
+turns up zero call sites. The user asked for something TZ doesn't cover at all: a **local persisted**
+log store the host app can read back later (e.g. an in-app "export logs" button), independent of
+whatever `logger` callback the consumer did or didn't supply. Two design questions were asked via
+`AskUserQuestion` rather than guessed (CLAUDE.md "ask before guessing"); the rest below are
+smallest-reasonable-assumption defaults, logged per CLAUDE.md's instruction to record rather than
+silently pick.
+
+**Decision (asked):** storage backend is a new SQLite table (`logs`), not a rotating file. Reuses
+`SqlitePort`/`Database`'s existing migration + contract-test infrastructure (already proven for chats,
+vectors, FTS5) instead of inventing file-rotation logic — `FileSystemPort.writeFile()` overwrites
+rather than appends, so a file-backed ring buffer would need its own in-memory-buffer-plus-flush
+machinery for no real benefit over an `INSERT`.
+
+**Decision (asked):** persisted logging is **opt-in**, off by default — new `LocalAiConfig.logging?:
+{ enabled?: boolean; minLevel?: 'debug'|'info'|'warn'|'error'; maxEntries?: number }`, default
+`enabled: false`. This deliberately does *not* try to match "logger defaults to no-op" from TZ §14
+(that line is about the pluggable *callback*, not about whether the library keeps its own local copy)
+— opt-in was the user's explicit choice over logging-by-default.
+
+**Decision (smallest reasonable assumption, not asked):** when `logging.enabled`, defaults are
+`minLevel: 'info'` and `maxEntries: 5000`, enforced as a hard cap — each append prunes the oldest rows
+past the limit in the same transaction (bounded storage, no unbounded growth; same shape as Phase 8's
+`SessionCache` LRU cap, `docs/decisions.md` #8). Revisit the numbers if real usage suggests otherwise;
+nothing in the TZ or corrections.txt calibrates them.
+
+**Decision (smallest reasonable assumption, not asked):** `exportLogs(options?: { since?: Date;
+level?: LogLevel; limit?: number })` returns a plain `LogEntry[]` — no direct file write, no share-sheet
+call from inside the library. Same reasoning as `docs/decisions.md`'s "Export/backup" entry above:
+the library returns data, the host app decides how to turn it into a file and hand it to a native
+share/save flow (`@capacitor/filesystem` + a share plugin) behind its own UI button. Keeps the
+hexagonal boundary intact — core has no opinion on native share UX — and matches how `exportChat()`/
+`exportChats()` already do it.
+
+**How to apply:** see ROADMAP.md's "Local logging & export" section (LOG.1–LOG.6, all done 2026-08-11)
+for the concrete task breakdown — migration, `LogStore` service, wiring real internal call sites (the
+dead `logger` callback gets wired at the same time, not just the new store), config, `LogExportApi`,
+docs, tests. One implementation-time addition worth a note here: LOG.3 uncovered and fixed a real
+concurrency bug — `emit()`'s persisted-log write can't be fire-and-forget without risking "cannot start
+a transaction within a transaction" against `NodeSqliteAdapter`'s single shared connection whenever two
+loggable events fire close together (or one fires right before another `SqlitePort` call elsewhere in
+`LocalAiClient`). Fixed by making `emit()`/the internal log-dispatch helper `async` and awaiting every
+call site, with two narrow logger-callback-only exceptions (`download:progress`, and the handful of
+throw sites on methods — `complete()`, `sendMessage()`'s pre-check — that must themselves stay
+synchronous-returning). See `local-ai-client.ts`'s `emit()` doc comment for the full reasoning; this is
+a project convention worth remembering for any future feature that wants to write to `SqlitePort` from
+inside `emit()` or another cross-cutting hook.
+
 ## Implementation/tooling notes (not TZ §16 questions)
 
 Engineering decisions discovered while building, not product questions — logged here for the same
