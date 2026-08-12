@@ -1,6 +1,13 @@
 # Техническое задание: `local-ai` — TS/Capacitor-библиотека офлайн-ассистента
 
-**Дата:** 2026-08-10 (обновлено — v4: учтена внешняя рецензия `docs/corrections.txt` — явный `CompletionStream` вместо гибридного типа, разделение MVP/advanced conversation API, жёсткая защита от рассинхрона векторного пространства, `releaseRuntime()` вместо `unloadAll()`, параметры сэмплинга и chat-template, политика контекстного окна, семантика отмены/сбоя; предыдущее — v3: проверка поддержки платформы/плагинов, device eligibility, download-плагин, независимое версионирование эмбеддинга, множественные чаты с внешней синхронизацией истории)
+**Дата:** 2026-08-10, §10 синхронизирован 2026-08-11 (обновлено — v5: §10 «Публичный API» сведён с фактической
+публичной поверхностью после Phase 8/security-hardening/logging — `ChatSearchApi.searchMessages()`,
+`ChatExportApi.exportChat()`/`exportChats()`, `ConversationSyncApi.updateMessage()`/`deleteMessages()`,
+`LogExportApi.exportLogs()`/`clearLogs()`, `LocalAiConfig.logging`, `chat-search:fallback-active`
+событие — ни один из них не был описан в v4, хотя все реализованы и покрыты тестами; см.
+`docs/decisions.md`'s «External consumer feedback review (2026-08-11)», пункт #3, откуда взят этот
+апдейт. Никакой из уже описанных v4-контрактов при этом не менялся — только добавлены пропущенные;
+предыдущее — v4: учтена внешняя рецензия `docs/corrections.txt` — явный `CompletionStream` вместо гибридного типа, разделение MVP/advanced conversation API, жёсткая защита от рассинхрона векторного пространства, `releaseRuntime()` вместо `unloadAll()`, параметры сэмплинга и chat-template, политика контекстного окна, семантика отмены/сбоя; ранее — v3: проверка поддержки платформы/плагинов, device eligibility, download-плагин, независимое версионирование эмбеддинга, множественные чаты с внешней синхронизацией истории)
 **Статус:** черновик ТЗ для реализации (готов к работе Claude/разработчиков)
 **Автор:** составлено на основе `docs/initial/*` + дополнительного исследования
 **Целевой читатель:** LLM/разработчик, который будет писать код библиотеки с нуля
@@ -922,6 +929,15 @@ export interface LocalAiConfig {
 
 Единая точка входа. `ConversationApi`/`ConversationSyncApi` (§9.2) и eligibility-методы (§6.4) — часть этого же фасада.
 
+> **v5 note:** этот раздел был синхронизирован 2026-08-11 с фактической публичной поверхностью после
+> Phase 8 («search + export/backup + `updateMessage`/`deleteMessages`»), security-hardening и
+> «Local logging & export» (все — `ROADMAP.md`, за пределами исходных §15-фаз, добавлены по запросу
+> пользователя после того, как v4 этого ТЗ считалось «готово к реализации»). Ниже — полный список,
+> включая то, что появилось после v4; `ChatSearchApi`/`ChatExportApi`/`LogExportApi` не имеют
+> отдельного §-раздела в этом ТЗ (не было запланировано на момент v4) — их контракт и обоснование
+> живут в `docs/decisions.md` («Full-text search», «Export/backup», «Local logging & export»
+> секции) и `src/core/conversations/conversation.types.ts`/`src/core/logging/logging.types.ts`.
+
 ### 10.0 Инференс-параметры и потоковый результат
 
 Пробел из первого черновика (`docs/corrections.txt`): нужна явная модель параметров сэмплинга, а не голый `CompletionInput` без структуры, и нужен явный (не гибридный) тип потокового результата:
@@ -988,9 +1004,13 @@ export interface LocalAiConfig {
   maxContextTokens?: number;
   ports?: Partial<LocalAiPorts>;
   logger?: LocalAiLogger;
+  /** Отдельное, opt-in персистентное хранилище логов (SQLite-таблица) — не то же самое, что logger
+   *  выше (тот no-op-колбэк, этот — читается обратно через exportLogs()). По умолчанию `enabled: false`.
+   *  См. docs/decisions.md «Local logging & export». */
+  logging?: { enabled?: boolean; minLevel?: LogLevel; maxEntries?: number };
 }
 
-export class LocalAiClient implements ConversationApi, ConversationSyncApi {
+export class LocalAiClient implements ConversationApi, ConversationSyncApi, ChatSearchApi, ChatExportApi, LogExportApi {
   static async create(config: LocalAiConfig): Promise<LocalAiClient>;
   static async checkSupport(ports?: Partial<Pick<LocalAiPorts, 'platformSupport'>>): Promise<SupportReport>;
 
@@ -1021,6 +1041,33 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi {
   // ConversationSyncApi (опционально, §9.2/§9.6) — режим B
   upsertChat(chat: { id: string; title: string; createdAt?: string; updatedAt?: string; metadata?: Record<string, unknown> }): Promise<Chat>;
   appendMessages(chatId: string, messages: Array<{ id: string; role: ChatMessage['role']; content: string; status?: ChatMessage['status']; createdAt: string; tokenCount?: number; metadata?: Record<string, unknown> }>): Promise<{ inserted: number; skippedExisting: number }>;
+
+  // ConversationSyncApi (продолжение, режим B) — Phase 8, docs/decisions.md #7a.
+  // Синхронизация правок/удалений отдельных сообщений из собственной БД хоста.
+  /** Частичный апдейт по совпадающим (chatId, messageId); бросает MessageNotFoundError, если такого сообщения нет. */
+  updateMessage(chatId: string, messageId: string, updates: { content?: string; status?: ChatMessage['status']; tokenCount?: number; metadata?: Record<string, unknown> }): Promise<ChatMessage>;
+  /** Отсутствующие id молча не учитываются в счётчике — ожидаемо для bulk delete-sync. */
+  deleteMessages(chatId: string, messageIds: string[]): Promise<{ deleted: number }>;
+
+  // ChatSearchApi — Phase 8 addition, no TZ §-section originally (see docs/decisions.md "Full-text search").
+  /** Полнотекстовый поиск по одному чату или по всем; snippet заполнен только на FTS5-пути. */
+  searchMessages(query: string, options?: { chatId?: string; limit?: number }): Promise<ChatSearchHit[]>;
+
+  // ChatExportApi — Phase 8 addition, no TZ §-section originally (see docs/decisions.md "Export/backup").
+  // Форма результата специально совпадает со входом upsertChat()/appendMessages() — round-trip
+  // restore без отдельного import-метода.
+  /** Резолвится null, если чата с таким id нет. */
+  exportChat(chatId: string): Promise<{ chat: Chat; messages: ChatMessage[] } | null>;
+  /** Экспортирует все чаты, пагинация как у listChats(). */
+  exportChats(options?: { limit?: number; offset?: number }): Promise<Array<{ chat: Chat; messages: ChatMessage[] }>>;
+
+  // LogExportApi — "Local logging & export" addition, no TZ §-section originally
+  // (see docs/decisions.md, same-named entry). Независимо от config.logger (см. LocalAiConfig выше) —
+  // это отдельное, opt-in персистентное хранилище (config.logging), которое читается через эти методы.
+  /** Только данные — без записи файла/share-sheet изнутри библиотеки, хост-приложение решает, что с этим делать. */
+  exportLogs(options?: { since?: Date; level?: LogLevel; limit?: number }): Promise<LogEntry[]>;
+  /** Очищает персистентный лог-стор; не влияет на config.logger колбэк. */
+  clearLogs(): Promise<void>;
 
   /** Тонкая обёртка над VectorStore, сама подставляет VectorSpaceDescriptor
    *  текущего активного эмбеддинга (§8.2) — обычному коду не нужно передавать
@@ -1062,6 +1109,9 @@ export interface LocalAiEventMap {
   'runtime:embedding-loaded': { embeddingId: string; version: number };
   'runtime:unloaded': { reason: 'manual' | 'background' | 'model-switch' | 'embedding-switch' };
   'vector-store:fallback-active': { reason: string };
+  /** Phase 8 addition (см. docs/decisions.md «Full-text search») — тот же opportunistic-primary/
+   *  self-tested/silent-fallback паттерн, что и vector-store:fallback-active, для FTS5 → LIKE. */
+  'chat-search:fallback-active': { reason: string };
   'vector-store:embedding-changed': { previous?: { id: string; version: number; dimensions: number }; current: { id: string; version: number; dimensions: number }; dimensionsChanged: boolean };
   'chat:created': { chatId: string };
   'chat:deleted': { chatId: string };

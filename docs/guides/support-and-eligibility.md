@@ -63,3 +63,21 @@ Each verdict (`'no'`, `'tight'`/`'unknown'` share one policy slot) independently
 `ensureModelReady()`/`ensureEmbeddingReady()` at all (no throw, no event) — `checkDeviceEligibility()`
 itself remains callable and honest regardless of policy, for a manual "are we sure?" check in your own
 UI.
+
+## Calibrated thresholds — help wanted
+
+TZ §6.2's `minRamGb ≈ ceil(sizeGB × 1.5)` / `recommendedRamGb ≈ ceil(sizeGB × 2.5)` formula (and the
+`tooSlowTokPerSec: 3` default) is explicitly a **starting point, not measured data** — nobody has run
+these models on real hardware across a RAM spread yet (no device was available while building this
+library; same residual risk as every `proposed` Phase 0 ADR). `minRamGb`/`recommendedRamGb` live in
+the **manifest**, not in library code (TZ §6.2's closing note) — so the fix for a bad number is editing
+your catalog, not a library release. This table is where calibrated numbers should land once someone
+runs the numbers on real devices; empty for now.
+
+| Model (quant) | File size | Device tested | `minRamGb` (measured) | `recommendedRamGb` (measured) | Measured tok/s | Notes |
+|---|---|---|---|---|---|---|
+| _(none yet — see `docs/pre-release-checklist.md`'s device-dependent section, FB.7)_ | | | | | | |
+
+If you calibrate real numbers for a model you use, consider contributing a row back here (or, if this
+becomes a published package, into the default manifest's `minRamGb`/`recommendedRamGb` fields
+directly) so the next consumer doesn't have to repeat the same benchmarking from zero.

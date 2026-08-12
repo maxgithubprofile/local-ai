@@ -27,6 +27,7 @@ a decision.
 | 17 | Default `contextStrategy` (`'truncate-oldest'` vs `'fail'`) | Open | Bootstrap follows TZ's stated default: `'truncate-oldest'` (§9.7) — flagged there as a product decision, not final | — | — |
 | 18 | Whether `'cancelled'`/`'error'` messages show in UI by default | Open | N/A to the library (consumer-app UI decision) — documented as an integration-guide example only | — | — |
 | 19 | Is `LlmRuntimePort.countTokens()` mandatory, or is a heuristic acceptable pre-Phase-4 | Resolved | Both real runtime adapters (`NodeLlamaCppAdapter`, `LlamaCppCapacitorAdapter`) implement `countTokens()` for real via the underlying plugin's own tokenizer (`model.tokenize()`/`context.tokenize()`) — no heuristic needed once a model is loaded. A chars/4-style heuristic remains only as Phase 5's context-policy fallback for the brief window before any model is loaded (TZ §9.7) | 2026-08-10 | [0001](adr/0001-llama-cpp-capacitor-api.md) |
+| 20 | A method to free storage by removing the currently-installed model/embedding **without** downloading a replacement (`switchModel()`/`switchEmbedding()` only delete the old file as a side effect of fetching a new one) | Open | Raised by external consumer feedback (`2026-08-11-local-ai-library-feedback.md` #6, from the Forta Chat integration) — realistic mobile scenario (user wants the 2.5GB back with no replacement in hand). Not implemented; see `ROADMAP.md`'s "External feedback backlog" section, task FB.5 | 2026-08-11 | — |
 
 ## How to resolve a row
 
@@ -227,3 +228,27 @@ Consequences accepted:
 - If a contributor's environment has working `better-sqlite3` and wants to exercise the sqlite-vec
   Node path, a second, opt-in `test/contract` parametrization can add `BetterSqliteAdapter` back
   later without removing `NodeSqliteAdapter` — not done now since it can't be verified from here.
+
+## External consumer feedback review (2026-08-11)
+
+**Source:** `C:\inetpub2025\forta.chat\docs\plans\llama2\2026-08-11-local-ai-library-feedback.md` —
+written by the Forta Chat team while planning their integration against this library at commit
+`32b45bd`. Not a code review; a "would I build on this" read of the TZ, ROADMAP, decisions ledger,
+guides and source. Ten "what could improve" items (`#1`-`#10`); logged here per CLAUDE.md's "don't
+guess silently" rule instead of actioning ad hoc. Disposition of each:
+
+| # | Item | Disposition |
+|---|---|---|
+| 1 | Device-verification caveat is in README's footer, easy to miss on a skim | **Done** — moved a one-line version to the top of README, right under the status paragraph |
+| 2 | `LocalAiClient` (1068 lines) mixes flat methods (`searchMessages`/`exportChat`/`exportLogs`/`clearLogs`) with the namespaced pattern (`client.vectors.*`/`client.downloads.*`) it already uses elsewhere | Logged as `ROADMAP.md` FB.1 — real refactor, not done in this pass (touches the public API surface + every call site, wants its own session) |
+| 3 | TZ §10 (public API) never updated for `searchMessages`/`exportChat(s)`/`updateMessage`/`deleteMessages`/`exportLogs`/`clearLogs` — CLAUDE.md calls the TZ "source of truth" | **Done** — §10 synced, version bumped to v5 (see TZ header) |
+| 4 | Product-open-questions (9 of 19 `Open` rows above) and engineering-open-tasks are interleaved in one list; no separate "must-decide-before-npm-publish" checklist | **Done** — added `docs/pre-release-checklist.md`, splits this ledger's `Open` rows by who needs to answer them |
+| 5 | `ConversationSyncApi` (Mode B) — the Forta Chat integration's entire architecture depends on it, but row #16 above is still `Open` ("ship in v1 at all?") | Not actionable by an agent — genuinely needs the product owner's word. Left `Open`, cross-referenced from the new pre-release checklist so it isn't missed |
+| 6 | No "just delete the model, no replacement" method | Logged as new ledger row **#20** above + `ROADMAP.md` FB.5 |
+| 7 | MPL-2.0 (`@capgo/capacitor-downloader`) noted but not explained in practical terms | **Done** — added a short "License note" paragraph to README |
+| 8 | Eligibility thresholds are a generic formula (§6.2), not per-model calibrated data | **Done** (partial) — added a "Calibrated thresholds" table stub to `docs/guides/support-and-eligibility.md`, empty pending real-device runs; real calibration itself needs a device, tracked as `ROADMAP.md` FB.7 |
+| 9 | Exact test counts ("222 tests as of…") hardcoded in README prose, drifts every phase | **Done** — reworded to avoid a number that needs manual upkeep (`pnpm test`'s CI output is the source of truth) |
+| 10 | `LogEntry.meta`/`exportLogs()` guide doesn't warn against persisting/exporting raw device or error data | **Done** — added a "What not to put in `meta`" section to `docs/guides/logging-and-export.md` |
+
+See `ROADMAP.md`'s "External feedback backlog — 2026-08-11" section for the task breakdown of what's
+still open (FB.1, FB.4/#5, FB.5/#20, FB.7's real calibration).

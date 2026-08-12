@@ -68,6 +68,35 @@ share-sheet call from inside the library. The host app decides how to turn it in
 to a native save/share flow; `local-ai` has no opinion on native share UX (hexagonal boundary,
 CLAUDE.md).
 
+## What not to put in `meta`
+
+`config.logger`'s callback and `config.logging`'s persisted store have **different** safety contracts,
+even though they're fed from the same internal call sites:
+
+- **`logger` callback** — an in-process function call. `meta` carries the real `Error` object intact,
+  no JSON-safety constraint (TZ §14). Fine to log anything here that your own app-side logger already
+  handles responsibly.
+- **`logging` persisted store / `exportLogs()`** — `meta` is stored as `JSON.stringify`d text in a
+  local SQLite table, and is explicitly designed to leave the device (the intended use is a host-app
+  "export logs" button feeding a share sheet, see below). Anything written here should be treated as
+  **eventually user-shareable data**, not an internal debug artifact.
+
+Concretely, avoid passing these into anything that reaches the persisted store:
+
+- Full eligibility/device snapshots (`EligibilityReport.device`, `DeviceSnapshot`) — these include raw
+  RAM/thermal/storage figures for the specific physical device; fine for your own crash-reporting
+  pipeline, not necessarily fine to hand a user a JSON file containing.
+- Raw `Error` objects passed through unfiltered — stack traces can incidentally contain local file
+  paths, and some runtime errors may embed partial prompt/completion content. Prefer `error.message`
+  plus a stable `code` (every `LocalAiError` subclass has one, CLAUDE.md) over the whole object.
+- Any chat/message content or embeddings — `local-ai`'s own internal log call sites never do this
+  today, but a consumer app building its own logging on top of `config.logger`/`config.logging` should
+  apply the same rule to its own log calls.
+
+If you need the richer, unfiltered version for your own crash reporting, use `config.logger` (in-memory
+only) for that and keep `config.logging`/`exportLogs()` reserved for what you're comfortable a user
+literally sees after tapping "export logs".
+
 ## Wiring an "Export logs" button
 
 ```ts

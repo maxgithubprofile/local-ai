@@ -19,6 +19,14 @@ verified from a device-less dev environment (a handful of Capacitor-only adapter
 against each native plugin's real, confirmed API but can't be executed without a physical Android/iOS
 device or emulator — flagged explicitly where that applies).
 
+> ⚠️ **"Phases 0–8 done" means the design and Node-side logic are done — not that this has run on a
+> phone.** The library's entire reason to exist (native LLM inference, real device downloads, real
+> device sensors) lives in `src/adapters/capacitor/**`, and every ADR covering that layer
+> (`docs/adr/0002`, `0003`, `0004`, `0006`) is still `proposed`, not `accepted`: APIs confirmed from
+> plugin source, runtime behavior on a real device unverified (no device/emulator was available while
+> building this). See "[What's verified vs. not, honestly](#whats-verified-vs-not-honestly)" below
+> before depending on this for a release.
+
 ## Quickstart
 
 ```bash
@@ -98,6 +106,7 @@ hosts.
 | [`docs/2026-08-10-local-ai-library-tz.md`](./docs/2026-08-10-local-ai-library-tz.md) | Source-of-truth spec. Never contradict it silently — see `CLAUDE.md`. |
 | [`ROADMAP.md`](./ROADMAP.md) | TZ §15 phases broken into agent-sized, checkable tasks, each with a status note. |
 | [`docs/decisions.md`](./docs/decisions.md) | Ledger of TZ §16 open questions and their resolutions, plus implementation/tooling notes. |
+| [`docs/pre-release-checklist.md`](./docs/pre-release-checklist.md) | Same open questions, re-sorted by who needs to act: product owner vs. device access vs. an agent can just do it. |
 | [`docs/adr/`](./docs/adr/) | Architecture Decision Records, one per Phase 0 spike / major choice. |
 | [`docs/guides/`](./docs/guides/) | Task-oriented guides (first run, eligibility, multi-chat, Mode B, lifecycle, manifest format, testing, logging & export). |
 | [`CLAUDE.md`](./CLAUDE.md) | Project rules for agentic development in this repo. |
@@ -136,13 +145,25 @@ by design (TZ §2, §6.1); `checkSupport()` reports this per-capability rather t
 library, since `sql`/`download` can still work on web depending on which plugins are present. Run
 `LocalAiClient.checkSupport()` before `create()` to decide what to show the user.
 
+## License note: `@capgo/capacitor-downloader` is MPL-2.0
+
+`local-ai` itself has no license decided yet (see `docs/decisions.md` #1). Independent of that, the
+default download-transport adapter (`CapgoDownloaderAdapter`, `src/adapters/capacitor/`) depends on
+`@capgo/capacitor-downloader`, which is MPL-2.0 — a **weak, file-level copyleft**: it requires source
+disclosure only for modifications to *that dependency's own files*, not for your app or for `local-ai`
+itself, and doesn't require your app to be open-sourced just for depending on it (unlike GPL/LGPL).
+Practically: don't fork/patch `@capgo/capacitor-downloader`'s own source without publishing your
+changes to it; using it as an unmodified dependency in a closed-source app is the normal, permitted
+case. This is not legal advice — confirm against your own project's license policy before shipping.
+
 ## What's verified vs. not, honestly
 
 This repo was built and tested in an environment with no physical Android/iOS device or emulator.
 Everything under `src/core/**` and the Node-side adapters is exercised by real, passing automated
-tests (`pnpm test` / `pnpm run test:contract` — 222 tests as of the "Local logging & export" addition,
-unit + integration + contract, including real GGUF inference via `node-llama-cpp` against a tiny
-fixture model, not mocks). The
+tests (`pnpm test` / `pnpm run test:contract` — all green as of this writing; see CI for the current
+exact count rather than a number here, which would just drift out of date every phase like the last
+one did — unit + integration + contract, including real GGUF inference via `node-llama-cpp` against a
+tiny fixture model, not mocks). The
 Capacitor production adapters (`src/adapters/capacitor/**`) are implemented against each plugin's real,
 installed `.d.ts`/native source — not README guesses — but their actual on-device behavior is
 unverified. `docs/adr/` documents exactly which spikes are `accepted` (desk-verifiable, e.g. plugin

@@ -628,3 +628,47 @@ to fire. **Status: met** — 222 total tests green (114 unit + 51 integration + 
 pre-existing + 10 new `LogStore`], up from SEC.1-3's 200), `pnpm run lint`/`typecheck`/`build` all clean.
 `LogStore`'s `CapacitorSqliteAdapter` path carries the same "not exercised in this environment" caveat
 as every other Capacitor-adapter claim in this ROADMAP.
+
+---
+
+## External feedback backlog — 2026-08-11 consumer review
+
+Not a TZ §15 phase. Source: `C:\inetpub2025\forta.chat\docs\plans\llama2\2026-08-11-local-ai-library-feedback.md`
+— written by the Forta Chat team while planning their own integration against this library (real
+consumer read of the TZ/ROADMAP/decisions/guides/source, not a code review). Ten items; the
+documentation-only ones were actioned directly in this pass (README banner/license note/test-count
+wording, TZ §10 sync, the two new guide sections, `docs/pre-release-checklist.md`) — see
+`docs/decisions.md`'s "External consumer feedback review" section for the full item-by-item
+disposition table. What's left as real engineering/product work:
+
+- [ ] **FB.1 Decompose `LocalAiClient`'s flat search/export/log methods into namespaces** — the facade
+  already uses the `readonly client.vectors.*` / `client.downloads.*` pattern (constructor-built,
+  readonly sub-objects) for two capability groups; `searchMessages`, `exportChat`/`exportChats`,
+  `exportLogs`/`clearLogs` are the odd ones out, sitting flat on `this` alongside 30+ other methods.
+  Proposed shape: `client.search.messages(...)`, `client.export.chat(...)`/`.chats(...)`,
+  `client.logs.export(...)`/`.clear(...)`. This is a public-API-surface change (breaks any consumer
+  code already written against the flat names, incl. Forta Chat's own integration plan) — needs
+  either a major-version bump discipline or a deprecated-alias transition period; do not start without
+  confirming which with the user first. Not started.
+- [ ] **FB.4/§16.16 Get an explicit yes/no on shipping `ConversationSyncApi` (Mode B) in v1** — flagged
+  again here because a real consumer (Forta Chat) is already architecting their entire integration
+  around it; `docs/decisions.md` row #16 has been `Open` since Phase 5. Action: ask the user directly,
+  don't infer from "it's implemented and tested" (implementation and release-scope were deliberately
+  kept separate, see that row's resolution text).
+- [ ] **FB.5/§16.20 `removeModel()`/`removeEmbedding()` without a replacement download** — new gap, not
+  in the original TZ. `switchModel()`/`switchEmbedding()` only ever delete the old artifact file as a
+  side effect of successfully downloading and verifying a new one (TZ §5.5/§5.6); there's no path to
+  "just free the space, I don't have a replacement yet". Needs a small TZ §10 addition (new facade
+  method(s), plus deciding what happens to `installed_artifacts`/session-cache/vector space when the
+  active model is removed with nothing to fall back to — `complete()`/`sendMessage()` presumably need
+  to throw a clear error rather than silently no-op) before implementation. Not started.
+- [ ] **FB.7 Calibrate real `minRamGb`/`recommendedRamGb`/`tooSlowTokPerSec` numbers per model** — TZ
+  §6.2's formula (`minRamGb ≈ ceil(sizeGB × 1.5)`) is explicitly a starting point, not measured data.
+  `docs/guides/support-and-eligibility.md` now has an empty table ready to fill in, but the actual
+  benchmarking needs real Android/iOS devices across a RAM spread — same physical-device dependency as
+  every Phase 0 ADR still `proposed`. Blocked on device access, same as the rest of the residual-risk
+  list in `ROADMAP.md`'s Phase 0 section.
+
+**Exit criterion:** none — this is a backlog, not a phase with a single done-state. Each row above
+gets checked off independently as it's actioned; FB.1 and FB.4 specifically should not be started
+without going back to the user first (API-breaking change / product decision respectively).
