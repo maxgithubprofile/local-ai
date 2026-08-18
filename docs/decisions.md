@@ -229,6 +229,35 @@ Consequences accepted:
   Node path, a second, opt-in `test/contract` parametrization can add `BetterSqliteAdapter` back
   later without removing `NodeSqliteAdapter` — not done now since it can't be verified from here.
 
+### `CapacitorSqliteAdapter` concurrent-connection/transaction hardening
+
+**Date:** 2026-08-18. A consumer app reported `@capacitor-community/sqlite` throwing "Connection
+... already exists" from `createConnection()` and "Already in transaction" from `beginTransaction()`
+when the "download model" flow ran. Root cause: `CapacitorSqliteAdapter.getConnection()`
+(`src/adapters/capacitor/capacitor-sqlite.adapter.ts`) cached only the *settled* connection, not the
+in-flight open — two callers racing into it before the first `await` returned (e.g. a consumer not
+memoizing `LocalAiClient.create()`, so a double button-press or a re-render invoked it twice
+concurrently, each running `Database.migrate()`) both saw `this.connection === null` and both called
+`createConnection()` natively. `transaction()` had no serialization either, so two overlapping
+`Database.migrate()`/`LogStore.append()` calls on the same native connection both called
+`beginTransaction()`. This is the same class of bug LOG.3 above already fixed *inside* one
+`LocalAiClient` (serializing `emit()`); this one is about calls arriving from *outside* — the port
+had no defense of its own against a caller that doesn't single-flight client creation.
+
+**Fix (defensive hardening, not a product decision — no TZ/ROADMAP item):**
+`CapacitorSqliteAdapter` now (a) caches the connection-open *promise*, so concurrent callers on the
+same adapter instance await one `createConnection()` instead of racing; (b) before creating a
+connection, checks `isConnection()`/`isDBOpen()` and reuses the existing native connection via
+`retrieveConnection()` when one is already registered under the same `databaseName` — covers the
+case of two separate adapter/client instances opening the same database name; (c) serializes
+`transaction()` calls through an internal promise chain so overlapping transactions queue instead of
+colliding on `beginTransaction()`. Not covered by `pnpm test` — this adapter requires the real
+Capacitor bridge (CLAUDE.md's testing rule), so it has no automated regression test; verified via
+`pnpm lint`/`pnpm typecheck`/`pnpm test:unit`/`pnpm test:integration` only. Consumers should still
+memoize `LocalAiClient.create()` (see `examples/minimal-capacitor-app/src/local-ai-setup.ts`'s
+`getClient()`) — this hardening makes accidental double-invocation non-fatal, it doesn't make
+concurrent client creation a supported pattern.
+
 ## External consumer feedback review (2026-08-11)
 
 **Source:** `C:\inetpub2025\forta.chat\docs\plans\llama2\2026-08-11-local-ai-library-feedback.md` —

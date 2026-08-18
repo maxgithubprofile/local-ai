@@ -27,6 +27,13 @@ const { DatabaseSync } = process.getBuiltinModule('node:sqlite') as { DatabaseSy
  */
 export class NodeSqliteAdapter implements SqlitePort {
   private readonly db: DatabaseSyncType;
+  // Serializes transaction() calls, same reasoning and shape as
+  // `CapacitorSqliteAdapter`'s `transactionChain` (see
+  // `docs/decisions.md`'s "CapacitorSqliteAdapter concurrent-connection/
+  // transaction hardening" entry, and `SqlitePort.transaction()`'s doc
+  // comment): `DatabaseSync.exec('BEGIN')` while another transaction is
+  // still open throws, so overlapping callers must queue rather than race.
+  private transactionChain: Promise<unknown> = Promise.resolve();
 
   constructor(path: string = ':memory:') {
     this.db = new DatabaseSync(path);
@@ -47,15 +54,23 @@ export class NodeSqliteAdapter implements SqlitePort {
   }
 
   async transaction<T>(fn: (tx: SqlitePort) => Promise<T>): Promise<T> {
-    this.db.exec('BEGIN');
-    try {
-      const result = await fn(this);
-      this.db.exec('COMMIT');
-      return result;
-    } catch (err) {
-      this.db.exec('ROLLBACK');
-      throw err;
-    }
+    const run = async (): Promise<T> => {
+      this.db.exec('BEGIN');
+      try {
+        const result = await fn(this);
+        this.db.exec('COMMIT');
+        return result;
+      } catch (err) {
+        this.db.exec('ROLLBACK');
+        throw err;
+      }
+    };
+    const scheduled = this.transactionChain.then(run, run);
+    this.transactionChain = scheduled.then(
+      () => undefined,
+      () => undefined,
+    );
+    return scheduled;
   }
 
   async close(): Promise<void> {

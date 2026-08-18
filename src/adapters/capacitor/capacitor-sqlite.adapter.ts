@@ -23,14 +23,51 @@ import type { SqlitePort, SqliteRow } from '../../core/ports/sqlite.port.js';
 export class CapacitorSqliteAdapter implements SqlitePort {
   private readonly connectionApi = new SQLiteConnection(CapacitorSQLite);
   private connection: SQLiteDBConnection | null = null;
+  // Caches the in-flight open, not just the settled result: two callers
+  // racing into getConnection() before the first `await` inside
+  // openConnection() returns must share one native `createConnection()`
+  // call, or the second throws "Connection ... already exists". Reset on
+  // failure so a genuine open error doesn't permanently wedge future calls.
+  private connectionPromise: Promise<SQLiteDBConnection> | null = null;
+  // Serializes transaction() calls on this instance: `beginTransaction()`
+  // while another transaction is still open throws "Already in transaction"
+  // on the shared native connection, so overlapping callers must queue
+  // rather than race. `.then(run, run)` runs the next transaction once the
+  // previous one *settles*, success or failure, and the `.catch()` keeps
+  // the chain itself always-resolving so a failed transaction doesn't
+  // permanently block the ones queued after it.
+  private transactionChain: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly databaseName: string = 'local_ai') {}
 
   private async getConnection(): Promise<SQLiteDBConnection> {
     if (this.connection) return this.connection;
-    this.connection = await this.connectionApi.createConnection(this.databaseName, false, 'no-encryption', 1, false);
-    await this.connection.open();
-    return this.connection;
+    if (!this.connectionPromise) {
+      this.connectionPromise = this.openConnection().catch((err: unknown) => {
+        this.connectionPromise = null;
+        throw err;
+      });
+    }
+    return this.connectionPromise;
+  }
+
+  private async openConnection(): Promise<SQLiteDBConnection> {
+    // A second `CapacitorSqliteAdapter`/`LocalAiClient` instance opening the
+    // same `databaseName` (e.g. a caller that doesn't memoize
+    // `LocalAiClient.create()` and re-invokes it) hits this same native
+    // connection registry, outside what the connectionPromise cache above
+    // can protect against — reuse the existing native connection instead of
+    // blindly creating a second one and throwing "already exists".
+    const { result: alreadyRegistered } = await this.connectionApi.isConnection(this.databaseName, false);
+    const conn = alreadyRegistered
+      ? await this.connectionApi.retrieveConnection(this.databaseName, false)
+      : await this.connectionApi.createConnection(this.databaseName, false, 'no-encryption', 1, false);
+    const { result: alreadyOpen } = await conn.isDBOpen();
+    if (!alreadyOpen) {
+      await conn.open();
+    }
+    this.connection = conn;
+    return conn;
   }
 
   async execute(sql: string, params?: unknown[]): Promise<void> {
@@ -54,16 +91,24 @@ export class CapacitorSqliteAdapter implements SqlitePort {
   }
 
   async transaction<T>(fn: (tx: SqlitePort) => Promise<T>): Promise<T> {
-    const conn = await this.getConnection();
-    await conn.beginTransaction();
-    try {
-      const result = await fn(this);
-      await conn.commitTransaction();
-      return result;
-    } catch (err) {
-      await conn.rollbackTransaction();
-      throw err;
-    }
+    const run = async (): Promise<T> => {
+      const conn = await this.getConnection();
+      await conn.beginTransaction();
+      try {
+        const result = await fn(this);
+        await conn.commitTransaction();
+        return result;
+      } catch (err) {
+        await conn.rollbackTransaction();
+        throw err;
+      }
+    };
+    const scheduled = this.transactionChain.then(run, run);
+    this.transactionChain = scheduled.then(
+      () => undefined,
+      () => undefined,
+    );
+    return scheduled;
   }
 
   async close(): Promise<void> {
@@ -71,6 +116,7 @@ export class CapacitorSqliteAdapter implements SqlitePort {
     await this.connection.close();
     await this.connectionApi.closeConnection(this.databaseName, false);
     this.connection = null;
+    this.connectionPromise = null;
   }
 
   async loadVectorExtension(extensionPath: string = 'vec0'): Promise<boolean> {
