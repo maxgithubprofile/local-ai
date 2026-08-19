@@ -30,6 +30,24 @@ export interface DownloadProgress {
   status: DownloadState['status'];
 }
 
+/**
+ * Snapshot of a possibly-interrupted download, read from disk without
+ * starting/resuming it — `LocalAiClient.getModelDownloadProgress()`/
+ * `getEmbeddingDownloadProgress()`. Lets a consumer show "resume from X%"
+ * before the user taps download, instead of only finding out once the
+ * transfer is already moving. `null` from those methods (not this type)
+ * means there's nothing to report — no manifest cached yet, or no partial
+ * file on disk at all.
+ */
+export interface PartialDownloadProgress {
+  /** Bytes actually on disk right now. */
+  bytesDownloaded: number;
+  /** From the manifest artifact's `sizeBytes` — the target total. */
+  sizeBytesExpected: number;
+  /** `bytesDownloaded / sizeBytesExpected * 100`, rounded. `100` here still means "not yet verified/loaded" — checksum verification only happens once a download actually runs to completion via `ensureModelReady()`. */
+  percent: number;
+}
+
 /** Public handle for an in-flight/completed download — TZ §7.5. */
 export interface DownloadHandle {
   readonly key: string;

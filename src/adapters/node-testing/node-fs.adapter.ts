@@ -37,6 +37,11 @@ export class NodeFsAdapter implements FileSystemPort {
     await fs.writeFile(filePath, data);
   }
 
+  async appendFile(filePath: string, data: Uint8Array): Promise<void> {
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.appendFile(filePath, data);
+  }
+
   async readFile(filePath: string): Promise<Uint8Array> {
     return new Uint8Array(await fs.readFile(filePath));
   }

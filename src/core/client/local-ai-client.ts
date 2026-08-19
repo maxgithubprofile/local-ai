@@ -26,7 +26,7 @@ import {
 } from '../errors.js';
 import { createMessageSearchIndex } from '../db/create-message-search-index.js';
 import type { MessageSearchIndex } from '../db/message-search-index.js';
-import type { DownloadProgress, DownloadHandle } from '../download/download-state.js';
+import type { DownloadProgress, DownloadHandle, PartialDownloadProgress } from '../download/download-state.js';
 import type {
   CompletionInput,
   CompletionOptions,
@@ -302,6 +302,86 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
       recommendedRamGb: artifact.recommendedRamGb,
       sizeBytes: artifact.sizeBytes,
     });
+  }
+
+  /**
+   * Reads how much of `target` is already on disk, without starting or
+   * resuming the download — for a consumer that wants to show "resume from
+   * X%" before the user taps download, rather than only finding out once
+   * `ensureModelReady()` is already moving (its own `onProgress` has no way
+   * to report a starting-point ahead of the first real network chunk).
+   * Resolves `null` if there's no cached manifest yet (nothing to size the
+   * percentage against) or no partial file at all — a fresh device and a
+   * fully-downloaded device look the same here; check
+   * `LocalAiClient`'s own readiness state to tell those apart.
+   * @param target Which artifact to check — defaults to `'model'`.
+   */
+  async getDownloadProgress(target: 'model' | 'embedding' = 'model'): Promise<PartialDownloadProgress | null> {
+    const manifest = this.currentManifest ?? (await this.manifestService.getCachedManifest());
+    if (!manifest) return null;
+    const artifact = target === 'embedding' ? manifest.embedding : manifest.model;
+    const path = this.ports.fileSystem.resolvePath(target === 'embedding' ? 'embeddings' : 'models', artifact.filename);
+    const stat = await this.ports.fileSystem.stat(path);
+    if (!stat || stat.sizeBytes <= 0) return null;
+    return {
+      bytesDownloaded: stat.sizeBytes,
+      sizeBytesExpected: artifact.sizeBytes,
+      percent: Math.min(100, Math.round((stat.sizeBytes / artifact.sizeBytes) * 100)),
+    };
+  }
+
+  /**
+   * Pauses the model download if one is currently running — the partial
+   * file stays on disk at whatever byte offset it reached; a caller
+   * awaiting `ensureModelReady()`/`downloadModel()` for it simply stops
+   * progressing until `resumeModelDownload()` is called (or the process
+   * restarts and `ensureModelReady()` runs again). No-op if nothing is
+   * downloading right now, or no manifest is cached yet.
+   */
+  async pauseModelDownload(): Promise<void> {
+    const manifest = this.currentManifest ?? (await this.manifestService.getCachedManifest());
+    if (!manifest) return;
+    const artifact = manifest.model;
+    await this.downloadEngine.pause(this.downloadEngine.keyFor(resolveArtifactUrl(artifact), artifact.filename));
+  }
+
+  /**
+   * Resumes a model download paused via `pauseModelDownload()`, continuing
+   * from wherever it left off (real byte-offset resume — see
+   * `CapacitorRangeDownloadAdapter`). No-op if nothing is paused, or no
+   * manifest is cached yet.
+   */
+  async resumeModelDownload(): Promise<void> {
+    const manifest = this.currentManifest ?? (await this.manifestService.getCachedManifest());
+    if (!manifest) return;
+    const artifact = manifest.model;
+    await this.downloadEngine.resume(this.downloadEngine.keyFor(resolveArtifactUrl(artifact), artifact.filename));
+  }
+
+  /**
+   * Deletes the model entirely: stops any in-flight/paused transfer,
+   * deletes the (partial or complete) file on disk, clears its persisted
+   * `download_state` row, releases the loaded LLM context if this was the
+   * active model, and demotes the registry's "current" model row. Leaves
+   * the manifest/eligibility state untouched — a later `ensureModelReady()`
+   * call downloads it again from scratch, same as a fresh device. Safe to
+   * call with nothing downloaded (no-op beyond the already-idempotent
+   * runtime/registry cleanup).
+   */
+  async deleteModel(): Promise<void> {
+    const manifest = this.currentManifest ?? (await this.manifestService.getCachedManifest());
+    if (manifest) {
+      const artifact = manifest.model;
+      const key = this.downloadEngine.keyFor(resolveArtifactUrl(artifact), artifact.filename);
+      const destinationPath = this.ports.fileSystem.resolvePath('models', artifact.filename);
+      await this.downloadEngine.cancel(key, destinationPath, { discardPartial: true });
+    }
+    if (this.modelLoaded) {
+      await this.ports.llmRuntime.releaseModel();
+      this.modelLoaded = false;
+      await this.emit('runtime:unloaded', { reason: 'model-deleted' });
+    }
+    await this.modelRegistry.clearCurrent('model');
   }
 
   /** TZ §6.3 — clears every locally-cached `LocalRuntimeVerdict` (`'tooSlow'`/`'oom'`), e.g. after the user frees device memory. */

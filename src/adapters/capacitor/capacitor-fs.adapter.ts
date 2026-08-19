@@ -1,8 +1,7 @@
 import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import type { FileSystemPort } from '../../core/ports/filesystem.port.js';
-
-const BASE64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+import { bytesToBase64, base64ToBytes } from '../shared/base64.js';
 
 /**
  * Minimal slice of `@capgo/capacitor-device-info`'s surface this file needs
@@ -20,39 +19,6 @@ interface DeviceInfoPlugin {
 /** Registration name confirmed in `docs/adr/0005-native-plugin-name-constants.md` — same plugin `capgo-device-info.adapter.ts` registers. */
 const DeviceInfo = registerPlugin<DeviceInfoPlugin>('DeviceInfo');
 
-/** No DOM lib (`atob`/`btoa`) is assumed available — this runs in a WebView, but the build itself targets plain ES2022. */
-function bytesToBase64(bytes: Uint8Array): string {
-  let result = '';
-  for (let i = 0; i < bytes.length; i += 3) {
-    const b0 = bytes[i]!;
-    const b1 = bytes[i + 1];
-    const b2 = bytes[i + 2];
-    result += BASE64_CHARS[b0 >> 2];
-    result += BASE64_CHARS[((b0 & 0x03) << 4) | (b1 === undefined ? 0 : b1 >> 4)];
-    result += b1 === undefined ? '=' : BASE64_CHARS[((b1 & 0x0f) << 2) | (b2 === undefined ? 0 : b2 >> 6)];
-    result += b2 === undefined ? '=' : BASE64_CHARS[b2 & 0x3f];
-  }
-  return result;
-}
-
-function base64ToBytes(base64: string): Uint8Array {
-  const clean = base64.replace(/=+$/, '');
-  const bytes: number[] = [];
-  let buffer = 0;
-  let bits = 0;
-  for (const char of clean) {
-    const value = BASE64_CHARS.indexOf(char);
-    if (value === -1) continue;
-    buffer = (buffer << 6) | value;
-    bits += 6;
-    if (bits >= 8) {
-      bits -= 8;
-      bytes.push((buffer >> bits) & 0xff);
-    }
-  }
-  return new Uint8Array(bytes);
-}
-
 /**
  * Wraps `@capacitor/filesystem` (TZ §4.3). Every method operates within a
  * single fixed `Directory` (default `Directory.Data` — "deleted when the
@@ -62,13 +28,10 @@ function base64ToBytes(base64: string): Uint8Array {
  * relative path *within* that directory, which every other method here
  * passes straight through as the plugin's own `path` option.
  *
- * The plugin's `readFile`/`writeFile` exchange binary data as base64
- * strings (no raw byte transport across the JS bridge) — `bytesToBase64`/
- * `base64ToBytes` above are a from-scratch codec rather than `atob`/`btoa`
- * because this file is compiled under a DOM-less `lib` (`tsconfig.json`
- * only has `ES2022`) even though it always *runs* in a WebView that does
- * have those globals; avoiding the DOM lib dependency keeps `tsc --noEmit`
- * clean without needing environment-specific type overrides.
+ * The plugin's `readFile`/`writeFile`/`appendFile` exchange binary data as
+ * base64 strings (no raw byte transport across the JS bridge) — see
+ * `../shared/base64.ts` for the codec and why it's from-scratch rather than
+ * `atob`/`btoa`.
  */
 export class CapacitorFsAdapter implements FileSystemPort {
   constructor(private readonly directory: Directory = Directory.Data) {}
@@ -95,6 +58,12 @@ export class CapacitorFsAdapter implements FileSystemPort {
     if (parent) await this.mkdir(parent, { recursive: true }).catch(() => undefined);
     const payload = typeof data === 'string' ? data : bytesToBase64(data);
     await Filesystem.writeFile({ path, directory: this.directory, data: payload, recursive: true });
+  }
+
+  async appendFile(path: string, data: Uint8Array): Promise<void> {
+    const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+    if (parent) await this.mkdir(parent, { recursive: true }).catch(() => undefined);
+    await Filesystem.appendFile({ path, directory: this.directory, data: bytesToBase64(data) });
   }
 
   async readFile(path: string): Promise<Uint8Array> {

@@ -1,6 +1,6 @@
 # 0003. `@capgo/capacitor-downloader` transport (Phase 0 spike 0.3)
 
-**Status:** proposed (desk research only — no device to confirm process-kill survival)
+**Status:** accepted (Android) — confirmed on a real device 2026-08-19, see "Real-device confirmation" below. iOS still unconfirmed.
 **Date:** 2026-08-10
 **TZ section(s):** §4.4, §7.2, §16.13
 
@@ -87,3 +87,51 @@ Plugin-name constant: `'CapacitorDownloader'` (feeds ADR 0005).
 - If process-kill survival turns out to be unreliable on one platform, no code change is needed — the
   always-re-verify design already degrades gracefully to "just re-download from scratch more often
   than strictly necessary," which is a UX cost, not a correctness bug.
+
+## Real-device confirmation (Android, 2026-08-19)
+
+Forta Chat's device loop exercised a real ~2.3GB model download end to end on a real Android phone,
+including a deliberate app-restart mid-download. Point 1 above is now answered, and not the way this
+ADR's "Decision" section hoped:
+
+- **`pause()`/`resume()` unconditionally reject** — `CapacitorDownloaderPlugin.java`'s Android
+  implementation: `call.reject("Pausing individual downloads is not supported on Android")` /
+  `"Resuming individual downloads is not supported on Android"`. There is no partial-resume path to
+  fall back to at all on this platform — every retry (whether from `DownloadEngine`'s own retry loop
+  or a fresh app process) calls `download()` again, which always issues a brand-new
+  `DownloadManager.enqueue()`.
+- Consequence this ADR's "always re-verify" design didn't anticipate: enqueueing again against an
+  **already-existing destination file** doesn't overwrite it — `DownloadManager` auto-renames to
+  `-1`/`-2`/... and starts a second, fully independent download in parallel with any leftover from a
+  previous attempt still running in the OS background. Left unhandled, every interruption leaks a
+  full-size orphan file. Fixed in `DownloadTransportPort.supportsResume` (new field,
+  `CapgoDownloaderAdapter` reports `false`) — `DownloadEngine` now deletes the previous attempt's
+  partial file before retrying when the transport can't actually resume, so a restart is at least a
+  *clean* restart, not a restart-plus-leak. See `docs/decisions.md`'s "no real resume on Android" entry.
+- Two more mismatches between this ADR's documented shapes (taken from the plugin's shipped
+  `.d.ts`) and its actual Android runtime behavior, found by reading the Java source after the
+  symptoms appeared:
+  - `downloadProgress`'s `progress` is a `0..1` fraction at runtime (`bytesDownloaded / bytesTotal`),
+    not the `0-100` this ADR's Context section documented from the `.d.ts`. `.d.ts` and runtime
+    disagree; runtime wins. Fixed in `CapgoDownloaderAdapter.onProgress`.
+  - `checkStatus()`'s real resolved value is `{status: <DownloadManager.STATUS_* int>,
+    bytesDownloaded, bytesTotal, reason?, reasonText?}`, not `{id, progress, state}` as documented
+    here and in the `.d.ts`. Fixed in `CapgoDownloaderAdapter.status()`.
+- Point 2 (destination path resolution) and point 3 (error-reason typing) from the original "not
+  verifiable" list are now moot/superseded: `getDownloadStatus()`'s real shape (point above) *does*
+  carry a `reasonText` on failure, and `destination` resolves against
+  `getContext().getExternalFilesDir(null)` — confirmed by reading the same Java source, not just
+  inferred.
+- iOS still unconfirmed — this device-loop session was Android-only (matches the project's current
+  Android-first focus). Downgrade "accepted" back to "proposed" for iOS specifically if/when that
+  platform is worked on; nothing above should be assumed to carry over to `URLSession`'s very
+  different resume model.
+
+**Follow-up, same session:** the consumer (forta.chat) asked for real resume rather than accepting
+this gap, so `CapacitorRangeDownloadAdapter` was built as a `supportsResume: true` alternative
+(`docs/decisions.md`'s "no real resume on Android" entry has the full writeup) and forta.chat now
+wires that in as its `downloadTransport` instead of `CapgoDownloaderAdapter`. This ADR's `accepted`
+status and findings above stand unchanged — `CapgoDownloaderAdapter` still exists, is still correctly
+documented by everything above, and remains available to any consumer that prefers `DownloadManager`'s
+OS-level background-continuation over `CapacitorRangeDownloadAdapter`'s real resume; this is a
+"which tradeoff do you want" choice between two adapters of the same port now, not a deprecation.

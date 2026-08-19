@@ -188,6 +188,141 @@ describe('LocalAiClient', () => {
     expect(embedding).toBeInstanceOf(Float32Array);
   });
 
+  // getDownloadProgress() — added 2026-08-19 so a consumer can show "resume
+  // from X%" before the user taps download, rather than only finding out
+  // once ensureModelReady() is already moving (docs/decisions.md's
+  // "no real resume on Android" entry — forta.chat's UI request that
+  // prompted this).
+  describe('getDownloadProgress()', () => {
+    it('resolves null before any manifest has ever been fetched/cached', async () => {
+      const client = await LocalAiClient.create({ manifestUrl, ports });
+
+      expect(await client.getDownloadProgress()).toBeNull();
+    });
+
+    it('resolves null once the manifest is cached but no partial file exists on disk yet', async () => {
+      const client = await LocalAiClient.create({ manifestUrl, ports });
+      await client.refreshManifest();
+
+      expect(await client.getDownloadProgress()).toBeNull();
+    });
+
+    it('reports bytes/percent from a partial file already on disk, without starting a download', async () => {
+      const client = await LocalAiClient.create({ manifestUrl, ports });
+      await client.refreshManifest();
+      const partialBytes = Math.floor(MODEL_BYTES.length / 2);
+      await ports.fileSystem.writeFile(
+        ports.fileSystem.resolvePath('models', 'model.gguf'),
+        MODEL_BYTES.subarray(0, partialBytes),
+      );
+
+      const progress = await client.getDownloadProgress();
+
+      expect(progress).toEqual({
+        bytesDownloaded: partialBytes,
+        sizeBytesExpected: MODEL_BYTES.length,
+        percent: Math.round((partialBytes / MODEL_BYTES.length) * 100),
+      });
+      // Reading it didn't touch the transport/attempt anything — no download_state row was created.
+      expect(llmRuntime.modelLoaded).toBe(false);
+    });
+
+    it('reports the embedding artifact when called with target: "embedding"', async () => {
+      const client = await LocalAiClient.create({ manifestUrl, ports });
+      await client.refreshManifest();
+      await ports.fileSystem.writeFile(ports.fileSystem.resolvePath('embeddings', 'embedding.gguf'), MODEL_BYTES);
+
+      expect(await client.getDownloadProgress('embedding')).toEqual({
+        bytesDownloaded: MODEL_BYTES.length,
+        sizeBytesExpected: MODEL_BYTES.length,
+        percent: 100,
+      });
+    });
+  });
+
+  // pauseModelDownload()/resumeModelDownload()/deleteModel() — added
+  // 2026-08-19 for forta.chat's Settings → Local AI pause/resume/delete
+  // buttons (docs/decisions.md).
+  describe('pauseModelDownload()/resumeModelDownload()/deleteModel()', () => {
+    it('is a no-op when no manifest is cached yet', async () => {
+      const client = await LocalAiClient.create({ manifestUrl, ports });
+      await expect(client.pauseModelDownload()).resolves.toBeUndefined();
+      await expect(client.resumeModelDownload()).resolves.toBeUndefined();
+      await expect(client.deleteModel()).resolves.toBeUndefined();
+    });
+
+    it('pauseModelDownload() stalls an in-flight ensureModelReady() until resumeModelDownload() is called', async () => {
+      // MODEL_BYTES (~27 bytes) would finish in a single read() cycle,
+      // before pause() could ever land mid-transfer — a dedicated, much
+      // larger payload here so there's genuinely something to pause.
+      const bigBytes = Buffer.alloc(60_000_000);
+      for (let i = 0; i < bigBytes.length; i++) bigBytes[i] = (i * 13) % 256;
+      const bigServer = createMockDownloadServer(bigBytes);
+      extraServers.push(bigServer);
+      const bigUrl = await bigServer.listen();
+
+      const body = manifestBody();
+      body.model.sha256 = hash.sha256(bigBytes);
+      body.model.sizeBytes = bigBytes.length;
+      stubManifest(body, { 'https://huggingface.co/org/qwen/resolve/abc123def456/model.gguf': bigUrl });
+
+      const client = await LocalAiClient.create({ manifestUrl, ports });
+      await client.refreshManifest();
+      const progressUpdates: number[] = [];
+
+      const ready = client.ensureModelReady({ onProgress: (p) => progressUpdates.push(p.percent) });
+      await vi.waitFor(() => expect(progressUpdates.length).toBeGreaterThan(0));
+
+      await client.pauseModelDownload();
+      expect(progressUpdates.at(-1)).toBeLessThan(100); // genuinely caught it mid-transfer, not after completion
+
+      // An already-in-flight read() can land one more tick right after
+      // abort() — wait for that race to settle, then confirm progress
+      // truly stays flat (not just "hasn't grown yet").
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const settledCount = progressUpdates.length;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(progressUpdates.length).toBe(settledCount); // still stalled — no further progress while paused
+      expect(llmRuntime.modelLoaded).toBe(false);
+
+      await client.resumeModelDownload();
+      await ready;
+
+      expect(llmRuntime.modelLoaded).toBe(true);
+    });
+
+    it('deleteModel() removes the downloaded file, unloads the runtime, and clears the registry so a later ensureModelReady() re-downloads', async () => {
+      const client = await LocalAiClient.create({ manifestUrl, ports });
+      await client.refreshManifest();
+      await client.ensureModelReady();
+      expect(llmRuntime.modelLoaded).toBe(true);
+
+      await client.deleteModel();
+
+      expect(llmRuntime.modelLoaded).toBe(false);
+      expect(await ports.fileSystem.exists(ports.fileSystem.resolvePath('models', 'model.gguf'))).toBe(false);
+      expect(await client.getDownloadProgress()).toBeNull();
+
+      // Re-downloads cleanly rather than short-circuiting on stale state.
+      await client.ensureModelReady();
+      expect(llmRuntime.modelLoaded).toBe(true);
+    });
+
+    it('deleteModel() with only a partial (never-completed) download discards it without touching the runtime', async () => {
+      const client = await LocalAiClient.create({ manifestUrl, ports });
+      await client.refreshManifest();
+      await ports.fileSystem.writeFile(
+        ports.fileSystem.resolvePath('models', 'model.gguf'),
+        MODEL_BYTES.subarray(0, Math.floor(MODEL_BYTES.length / 2)),
+      );
+
+      await expect(client.deleteModel()).resolves.toBeUndefined();
+
+      expect(llmRuntime.modelLoaded).toBe(false);
+      expect(await ports.fileSystem.exists(ports.fileSystem.resolvePath('models', 'model.gguf'))).toBe(false);
+    });
+  });
+
   it('complete() before ensureModelReady() rejects via stream.result, not a throw', async () => {
     const client = await LocalAiClient.create({ manifestUrl, ports });
     const stream = client.complete({ messages: [{ role: 'user', content: 'hi' }] });

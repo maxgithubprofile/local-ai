@@ -22,7 +22,7 @@ export type {
 } from './support/types.js';
 export { evaluateEligibility } from './support/eligibility-service.js';
 
-export type { DownloadState, DownloadProgress, DownloadHandle } from './download/download-state.js';
+export type { DownloadState, DownloadProgress, DownloadHandle, PartialDownloadProgress } from './download/download-state.js';
 
 export type {
   Chat,

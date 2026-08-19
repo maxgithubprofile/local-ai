@@ -78,4 +78,13 @@ export class ModelRegistry {
     });
     return { previous };
   }
+
+  /** Demotes whatever is current for `kind`, if anything — `deleteModel()`'s
+   *  bookkeeping counterpart to `setCurrent()`. Leaves the row itself in
+   *  place (history, same as `setCurrent()`'s own demotion step) rather
+   *  than deleting it; only `is_current` changes. No-op if nothing is
+   *  current. */
+  async clearCurrent(kind: 'model' | 'embedding'): Promise<void> {
+    await this.sqlite.execute('UPDATE installed_artifacts SET is_current = 0 WHERE kind = ? AND is_current = 1', [kind]);
+  }
 }

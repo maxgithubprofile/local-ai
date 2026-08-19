@@ -9,6 +9,19 @@ import type { Unsubscribe } from '../types.js';
  * this port — it does not run a byte-range loop itself.
  */
 export interface DownloadTransportPort {
+  /**
+   * Whether calling `start()` again after an interrupted attempt actually
+   * resumes from the existing partial file, or restarts from byte 0.
+   * `NodeRangeDownloadAdapter` is `true` (real `Range:` requests).
+   * `CapgoDownloaderAdapter` is `false` — confirmed on-device 2026-08-19:
+   * the plugin's `pause()`/`resume()` unconditionally reject "not supported
+   * on Android", and `start()` always issues a fresh
+   * `DownloadManager.enqueue()`. `DownloadEngine` uses this to decide
+   * whether a retry should delete the previous partial file first (`false`)
+   * or leave it for the transport to resume from (`true`) — see
+   * `docs/decisions.md`'s "no real resume on Android" entry.
+   */
+  readonly supportsResume: boolean;
   start(task: { id: string; url: string; destinationPath: string; headers?: Record<string, string> }): Promise<void>;
   pause(id: string): Promise<void>;
   resume(id: string): Promise<void>;

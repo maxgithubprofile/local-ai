@@ -37,6 +37,17 @@ export class CapacitorSqliteAdapter implements SqlitePort {
   // the chain itself always-resolving so a failed transaction doesn't
   // permanently block the ones queued after it.
   private transactionChain: Promise<unknown> = Promise.resolve();
+  // True while running inside transaction()'s fn(this) callback. execute()
+  // consults this to tell the native plugin NOT to auto-wrap its own call in
+  // another transaction — @capacitor-community/sqlite's execute()/run()
+  // default their `transaction` param to true, so calling them unmodified
+  // from inside an already-open transaction() nests a second
+  // beginTransaction() on the same connection and the native plugin throws
+  // "Already in transaction" (found on-device, forta.chat AI-chat migration
+  // runner: transaction() -> tx.execute(migrationSql) reproduced this
+  // exactly — Node adapters/tests never caught it, neither better-sqlite3
+  // nor node:sqlite has this "auto-transaction-wraps-every-call" behavior).
+  private inTransaction = false;
 
   constructor(private readonly databaseName: string = 'local_ai') {}
 
@@ -72,10 +83,13 @@ export class CapacitorSqliteAdapter implements SqlitePort {
 
   async execute(sql: string, params?: unknown[]): Promise<void> {
     const conn = await this.getConnection();
+    // See `inTransaction` doc comment: suppress the plugin's own implicit
+    // transaction wrapping while transaction() already has one open.
+    const autoTransaction = !this.inTransaction;
     if (params && params.length > 0) {
-      await conn.run(sql, params);
+      await conn.run(sql, params, autoTransaction);
     } else {
-      await conn.execute(sql);
+      await conn.execute(sql, autoTransaction);
     }
   }
 
@@ -94,6 +108,7 @@ export class CapacitorSqliteAdapter implements SqlitePort {
     const run = async (): Promise<T> => {
       const conn = await this.getConnection();
       await conn.beginTransaction();
+      this.inTransaction = true;
       try {
         const result = await fn(this);
         await conn.commitTransaction();
@@ -101,6 +116,8 @@ export class CapacitorSqliteAdapter implements SqlitePort {
       } catch (err) {
         await conn.rollbackTransaction();
         throw err;
+      } finally {
+        this.inTransaction = false;
       }
     };
     const scheduled = this.transactionChain.then(run, run);

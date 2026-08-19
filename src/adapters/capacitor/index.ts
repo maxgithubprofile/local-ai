@@ -13,6 +13,7 @@
 export { CapacitorPlatformSupportAdapter } from './capacitor-platform-support.adapter.js';
 export { CapgoDeviceInfoAdapter } from './capgo-device-info.adapter.js';
 export { CapgoDownloaderAdapter } from './capgo-downloader.adapter.js';
+export { CapacitorRangeDownloadAdapter } from './capacitor-range-download.adapter.js';
 export { CapacitorFsAdapter } from './capacitor-fs.adapter.js';
 export { CapacitorSqliteAdapter } from './capacitor-sqlite.adapter.js';
 export { LlamaCppCapacitorAdapter } from './llama-cpp-capacitor.adapter.js';

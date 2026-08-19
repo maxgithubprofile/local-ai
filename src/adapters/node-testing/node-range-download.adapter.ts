@@ -33,6 +33,7 @@ interface TaskRecord {
  * response to existing bytes would corrupt the file.
  */
 export class NodeRangeDownloadAdapter implements DownloadTransportPort {
+  readonly supportsResume = true;
   private readonly tasks = new Map<string, TaskRecord>();
   private readonly progressListeners = new Set<(e: { id: string; progressPercent: number }) => void>();
   private readonly completedListeners = new Set<(e: { id: string }) => void>();

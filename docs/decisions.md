@@ -281,3 +281,187 @@ guess silently" rule instead of actioning ad hoc. Disposition of each:
 
 See `ROADMAP.md`'s "External feedback backlog — 2026-08-11" section for the task breakdown of what's
 still open (FB.1, FB.4/#5, FB.5/#20, FB.7's real calibration).
+
+### First real-device run (2026-08-19) — two bugs the native bridge alone could surface
+
+**Context:** Forta Chat set up a working real-device loop (`docs/plans/llama2/device-ai-loop.md`) —
+a physical Android phone connected via `adb`, `local-ai` symlinked in via its `file:` dependency so a
+local `npm run build` here is picked up by the consumer's next `npm run cap:run` with no relink step.
+First real exercise of the AI tab (open chat list → new AI chat → model gate) since Phase 0.5/0.6/7.4
+were written up as "needs a device" and left undone. Two bugs found, both invisible to `pnpm test`
+for the same underlying reason: they only exist where a real SQLite build (`@capacitor-community/sqlite`
+on the device) diverges from Node's `node:sqlite` (no `fts5` module at all, and no
+"every call auto-wraps itself in a transaction" behavior).
+
+1. **`CapacitorSqliteAdapter.execute()` didn't suppress the native plugin's own implicit
+   transaction.** `transaction()` opens one via `conn.beginTransaction()`, but
+   `@capacitor-community/sqlite`'s `execute()`/`run()` default their own `transaction` param to
+   `true` when omitted — called unmodified from inside an already-open `transaction()` (exactly what
+   the migration runner does), the plugin tries to nest a second `beginTransaction()` on the same
+   connection and throws "Already in transaction". Reproduced on-device as
+   `[ai-chat-store] ensureHistorySynced (select) failed: Error: Execute: Failed in
+   beginTransactionAlready in transaction` the very first time a consumer opened an AI chat.
+   **Fix:** `execute()` now tracks whether it's running inside `transaction()` (`inTransaction` flag,
+   set/reset around `fn(this)`) and passes `transaction: false` to `conn.execute()`/`conn.run()`
+   whenever it is. Pinned by a new `test/unit/adapters/capacitor-sqlite.adapter.test.ts` that mocks
+   `@capacitor-community/sqlite`'s connection surface (the bug is entirely about *which arguments we
+   pass*, not native behavior, so a mock is enough — no device needed to pin this one).
+2. **`selfTestFts5()`'s own literal broke FTS5's query parser.** `src/core/db/create-message-search-index.ts`
+   ran `... MATCH ?` with the bound value `'self-test'` — FTS5 parses the *content* of a MATCH
+   argument as its own query language even when parameter-bound, and an unquoted hyphen there isn't
+   literal text, so it failed with `no such column: test` and permanently reported FTS5 unavailable,
+   falling back to `LikeMessageSearchIndex` on every device that actually has FTS5 compiled in. The
+   real search path (`fts5-message-search-index.ts`) already wraps every query through
+   `toFtsPhraseQuery()` for exactly this reason — only the self-test's own hardcoded literal was
+   unquoted. **Fix:** quote the self-test literal the same way (`'"self-test"'`). Not addable as a
+   Node unit test — `node:sqlite` has no `fts5` module at all (see `create-vector-store.ts`'s
+   equivalent Node caveat above), so `selfTestFts5()` always short-circuits at `CREATE VIRTUAL TABLE`
+   there regardless of the MATCH query below it; verified by re-running the on-device repro instead
+   (`chat-search:fallback-active` no longer fires on that device after the fix).
+
+Neither bug needed a *slow* or *low-end* device to find — a mid-range phone with USB debugging was
+enough, because both are about the real SQLite build's exact behavior, not about performance/thermal
+degradation. Reinforces `2026-08-11-local-ai-library-feedback.md` point #1: the native bridge is
+undertested not because it's hard to reach, but because nobody had plugged a phone in and opened the
+feature yet.
+
+### `CapgoDownloaderAdapter` — real plugin shapes didn't match this file's assumptions (2026-08-19)
+
+Same device/session, next step down the flow: with a real, CORS-correct manifest wired in
+(forta.chat provisioned one), the actual model download (Qwen3-4B-GGUF Q4_K_M, ~2.3GB) was exercised
+on-device for the first time ever. Two shape mismatches found by reading
+`@capgo/capacitor-downloader`'s real Android source (`CapacitorDownloaderPlugin.java`) after the
+symptom appeared — ADR 0003 was `proposed` on source-reading alone at the time it was written, and
+apparently the read wasn't thorough enough, or the plugin's behavior drifted since:
+
+1. **`downloadProgress`'s `progress` field is a `0..1` fraction** (`bytesDownloaded / bytesTotal` in
+   the Java source), not `0-100` percent as `capgo-downloader.adapter.ts` assumed and passed straight
+   through as `progressPercent`. Symptom: the download UI showed a frozen "Скачивание... 0%" for the
+   *entire* multi-minute transfer of a real 2.3GB file — `Math.round(0.14)` is still `0`. Would have
+   looked identical to a genuinely stuck/hung download from the outside; only reading the native
+   source (not just the plugin's own docs/types, which don't mention this) revealed the file was
+   downloading fine the whole time.
+2. **`checkStatus()`'s real return shape is `{status: <DownloadManager.STATUS_* int>, bytesDownloaded,
+   bytesTotal, reason?, reasonText?}`**, not the `{id, progress, state: 'PENDING'|'RUNNING'|...}` this
+   file declared and read from (`task.progress`, `task.state` — both simply `undefined` against the
+   real response, silently producing `NaN`/`undefined` rather than throwing). Not yet triggered this
+   session — `ensureModelReady()`'s main path is driven by `onProgress`/`onCompleted`/`onFailed`
+   events, not by polling `status()` — but confirmed broken by the same source read, and `status()` is
+   the intended fallback/recovery path (checking an in-flight download's state after an app restart),
+   so a real user hitting *that* path would have gotten silently-wrong data instead of a working
+   status check.
+
+**Fix:** `capgo-downloader.adapter.ts` — `onProgress` now multiplies by 100; `status()` decodes the
+real int status (`PENDING=1`, `RUNNING=2`, `PAUSED=4`, `SUCCESSFUL=8`→`'done'`, everything else
+(including `FAILED=16`) →`'error'` with `reasonText` as the message) and computes percent from
+`bytesDownloaded`/`bytesTotal` itself. Regression: `test/unit/adapters/capgo-downloader.adapter.test.ts`,
+mocking the plugin with the *real* shapes found in the Java source — the bug was a unit-conversion/
+shape mistake, not native behavior, so it's fully pinnable without a device.
+
+**Follow-up:** done — `docs/adr/0003-capgo-capacitor-downloader.md` bumped to `accepted` (Android)
+with these corrections folded in, plus the resume finding below.
+
+### No real resume on Android — `supportsResume` capability flag (2026-08-19)
+
+Same session, next thing found: restarting the app mid-download (deliberately, to test the
+"process-kill survival" question ADR 0003 flagged as unverified) made the download restart from 0%
+bytes, not resume from where it left off. Root cause, confirmed by reading
+`CapacitorDownloaderPlugin.java`: `pause()`/`resume()` **unconditionally reject** — `"Pausing/
+Resuming individual downloads is not supported on Android"`. There is no partial-resume path on this
+platform at all; `download-engine.ts`'s own doc comment claiming `transport.start()` again is
+"resume-if-partial-exists" was an unverified assumption that turned out to be false for this adapter
+(it's true for `NodeRangeDownloadAdapter`, which does real `Range:` requests — the two adapters
+genuinely differ here, which is exactly why this needed to be a per-adapter capability, not a global
+assumption).
+
+Consequence beyond just "no resume": retrying calls `download()` again, which issues a fresh
+`DownloadManager.enqueue()` against a destination file that already partially exists — Android
+auto-renames to `-1`/`-2`/... rather than overwriting, so every interruption silently leaked a
+full-size orphan file (found one from an earlier test run: `model__qwen3-4b__v1-1.gguf`, sitting next
+to the real one, both allocated to the full 2.3GB target size on disk before either had actually
+finished writing — that pre-allocation is itself worth remembering, it looks like "already downloaded"
+in a plain `ls`/`stat` and cost real debugging time here before checking actual transferred bytes via
+`DownloadManager`'s progress column instead).
+
+**Fix:** `DownloadTransportPort` gained `readonly supportsResume: boolean`
+(`CapgoDownloaderAdapter`: `false`; `NodeRangeDownloadAdapter`: `true`, it already resumed correctly
+so this was purely making an existing distinction explicit, not fixing that adapter itself).
+`DownloadEngine.runOneAttempt()` deletes the previous attempt's partial file before retrying only
+when `!transport.supportsResume` — a transport that can genuinely resume must keep the file in place,
+or its own Range-request logic breaks (this exact regression was caught by a test before it shipped:
+an earlier version of this fix deleted the file unconditionally for every retry, which the existing
+"resume after a ~50% connection drop" test didn't catch because it only asserts the *final* result is
+correct, not that a partial-resume request actually happened — added a `deleteFileSpy` assertion in
+both directions, `test/integration/download/download-engine.test.ts`'s new `describe('supportsResume')`
+block, specifically to close that gap).
+
+**Update, same session:** the user asked for real resume after all, not just the cleanup above. Built
+`CapacitorRangeDownloadAdapter` (`src/adapters/capacitor/capacitor-range-download.adapter.ts`) —
+`supportsResume: true`, chunked `Range:` requests through `@capacitor/core`'s `CapacitorHttp` (native
+`URLConnection`/`URLSession`, not the WebView's `fetch` — sidesteps the same CORS enforcement the
+manifest fetch hit, see `docs/plans/llama2/device-ai-loop.md`), writing incrementally via a new
+`FileSystemPort.appendFile()` port method (implemented for both `NodeFsAdapter` and
+`CapacitorFsAdapter`) rather than holding the whole multi-gigabyte artifact in memory.
+`CapacitorHttp` has no streaming-response API (unlike Node's `fetch`, which
+`NodeRangeDownloadAdapter` streams from directly), so this chunks deliberately in fixed 8MB
+requests — a genuine engineering tradeoff (bridge round-trip count vs. peak-memory risk on the
+low-end devices this project targets), not device-calibrated yet. Fails closed (throws rather than
+guessing) if a server ever ignores the `Range` header, instead of risking a multi-gigabyte response
+decoded from base64 in one shot. forta.chat's `create-client.ts` now wires this in as
+`downloadTransport` instead of `CapgoDownloaderAdapter` — the latter's file/export stays in the
+library (still an accurate, documented account of the native plugin's real Android behavior, useful
+reference for anyone hitting the same "why doesn't `pause()` work" question), just no longer used for
+this port by this particular consumer. Unlocks the UI request that started this: an interrupted
+download's retry can now genuinely be a resume, not a restart — `docs/plans/llama2` UI work (the
+"докачать модель (скачано 19%)" button copy) is unblocked, not done here (this session stayed in
+`local-ai`).
+
+Tests: `test/unit/adapters/capacitor-range-download.adapter.test.ts` (6 tests — chunking, progress,
+resume-from-partial-file, fail-closed on non-206, pause) mock `@capacitor/core`'s `CapacitorHttp`
+with an in-memory Range-aware fake rather than a real HTTP server, since the adapter's own new logic
+(chunk math, resume-offset, Content-Range parsing, cancel handling) is what needed pinning — the real
+native HTTP transport is `@capacitor/core`'s to verify, not reachable from Node either way.
+
+## Pause/resume/delete client API (2026-08-19)
+
+Two more forta.chat-side reports drove this: (1) `markDownloadStarting()` seeded the progress bar at
+a hardcoded 0% even on a resumed download — the transport itself resumed correctly from the right
+byte offset, but the UI briefly *looked* like a full restart every time, until the first real
+`onProgress` tick caught back up. (2) The user asked for explicit Pause/Resume and Delete-model
+controls in Settings — `CapacitorRangeDownloadAdapter`'s `pause()`/`resume()`/`stop()` were already
+real (built same-session, see above) but nothing above the transport layer exposed them.
+
+`DownloadEngine` gained `keyFor()` (the same deterministic key `downloadArtifact()` computes
+internally, so a caller can address an in-flight/interrupted download without the engine exposing any
+other internal state) plus thin `pause()`/`resume()`/`cancel()` wrappers over the transport — `cancel()`
+also clears the persisted `download_state` row and, when `discardPartial`, deletes the file directly
+(not left to `transport.stop()` alone, since the transport may have no in-memory task record at all
+after an app restart). `LocalAiClient` gained `pauseModelDownload()`/`resumeModelDownload()`/
+`deleteModel()`, all resolving the current manifest's model artifact to a key via `keyFor()`.
+`ModelRegistry` gained `clearCurrent()` (demotes the "current" row without deleting it — same
+demotion `setCurrent()` already does internally, just without a new row to promote). `deleteModel()`
+composes all three: `downloadEngine.cancel(..., { discardPartial: true })`, `llmRuntime.releaseModel()`
+if it was loaded, `modelRegistry.clearCurrent('model')`.
+
+One real subtlety worth recording: `pause()` deliberately fires neither `onCompleted` nor `onFailed`
+on the transport (see `CapacitorRangeDownloadAdapter.pause()`'s own comment) — so a caller `await`ing
+`downloadArtifact()`/`ensureModelReady()` while paused just stays pending, not settled, until
+`resume()` lets the same in-flight promise chain complete normally. This is exactly what forta.chat's
+UI wants (the download "operation" spans the pause), but it means `pauseModelDownload()`/
+`resumeModelDownload()` carry NO progress-event signal of their own — forta.chat's store tracks
+"is paused" as UI-only state, cleared by any real `download:progress` tick or a terminal
+`download:completed`/`download:failed`, not by anything `local-ai` emits directly.
+
+Also fixed in this pass: `download-engine.ts`'s `computeKey()` had a literal NUL byte in place of the
+space between `${url}` and `${filename}` in its template literal — real file corruption (cause
+unknown, possibly a bad write in an earlier session), invisible in a normal editor/Read but enough to
+make `grep`/the Edit tool's exact-string matching treat the file as binary. Fixed by patching the byte
+directly; functionally the NUL was silently absorbed into the hashed string on every call so it never
+produced a visible bug, just corrupted the file at rest.
+
+Tests: `test/integration/download/download-engine.test.ts`'s new `pause/resume/cancel` block and
+`test/integration/client/local-ai-client.test.ts`'s new `pauseModelDownload()/resumeModelDownload()/
+deleteModel()` block both use a dedicated ~60MB payload (not the suites' usual few-byte/2MB fixtures)
+specifically so there's a real window to catch a transfer mid-flight before it completes — a first
+draft using the small shared fixture passed all assertions vacuously (the "pause" landed after the
+tiny download had already finished).

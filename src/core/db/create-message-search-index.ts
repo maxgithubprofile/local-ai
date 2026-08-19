@@ -16,7 +16,15 @@ async function selfTestFts5(sqlite: SqlitePort): Promise<boolean> {
     await sqlite.execute(`DROP TABLE IF EXISTS ${table}`);
     await sqlite.execute(`CREATE VIRTUAL TABLE ${table} USING fts5(content)`);
     await sqlite.execute(`INSERT INTO ${table}(rowid, content) VALUES (1, 'local-ai fts5 self-test')`);
-    await sqlite.query(`SELECT rowid FROM ${table} WHERE ${table} MATCH ?`, ['self-test']);
+    // Must quote the same way toFtsPhraseQuery() does for real searches
+    // (fts5-message-search-index.ts) — an unquoted hyphen is FTS5 query
+    // *syntax*, not literal content, so unquoted 'self-test' fails to parse
+    // ("no such column: test") and permanently misreports FTS5 as
+    // unavailable on every device that actually has it. Found on-device
+    // (2026-08-19): Node tests never caught this because node:sqlite has no
+    // fts5 module at all, so selfTestFts5() always short-circuits at
+    // CREATE VIRTUAL TABLE there, long before this MATCH query would run.
+    await sqlite.query(`SELECT rowid FROM ${table} WHERE ${table} MATCH ?`, ['"self-test"']);
     return true;
   } catch {
     return false;
