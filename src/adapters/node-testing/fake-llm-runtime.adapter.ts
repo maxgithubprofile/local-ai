@@ -14,8 +14,8 @@ export class FakeLlmRuntimeAdapter implements LlmRuntimePort {
   readonly completeCalls: Array<{ input: CompletionInput; options?: { skipNativeTemplating?: boolean } }> = [];
   modelLoaded = false;
   embeddingModelLoaded = false;
-  /** Records the exact `modelPath` each call received — lets tests assert `LocalAiClient` resolved it to an absolute path before calling here. */
-  readonly loadModelCalls: Array<{ modelPath: string; contextLength: number }> = [];
+  /** Records the exact `modelPath`/`threads` each call received — lets tests assert `LocalAiClient` resolved the path and forwarded `runtimeTuning.threads` correctly. */
+  readonly loadModelCalls: Array<{ modelPath: string; contextLength: number; threads?: number }> = [];
   readonly loadEmbeddingModelCalls: Array<{ modelPath: string }> = [];
 
   /** Tokens to push before settling, and how to settle — configurable per test. */
@@ -28,7 +28,7 @@ export class FakeLlmRuntimeAdapter implements LlmRuntimePort {
   // several pre-existing tests call loadModel()/loadEmbeddingModel() with no
   // args just to flip modelLoaded/embeddingModelLoaded on, and don't care
   // about the path.
-  async loadModel(options?: { modelPath: string; contextLength: number }): Promise<void> {
+  async loadModel(options?: { modelPath: string; contextLength: number; threads?: number }): Promise<void> {
     if (options) this.loadModelCalls.push(options);
     this.modelLoaded = true;
   }

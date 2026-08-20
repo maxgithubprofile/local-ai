@@ -19,6 +19,9 @@ vi.mock('llama-cpp-pro', () => ({
 // module is loaded dynamically after registering the mocks — matches
 // capacitor-range-download.adapter.test.ts's own ordering in this repo.
 const { LlamaCppCapacitorAdapter } = await import('../../../src/adapters/capacitor/llama-cpp-capacitor.adapter.js');
+// Same mocked module instance the adapter itself imports `initLlama` from —
+// lets tests assert what loadModel() actually forwarded to it.
+const { initLlama } = await import('llama-cpp-pro');
 
 const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [{ role: 'user', content: 'привет' }];
 
@@ -31,6 +34,26 @@ async function loadedAdapter(): Promise<InstanceType<typeof LlamaCppCapacitorAda
   await adapter.loadModel({ modelPath: '/abs/model.gguf', contextLength: 4096 });
   return adapter;
 }
+
+describe('LlamaCppCapacitorAdapter.loadModel() — n_threads plumbing (perf-tuning plan §3)', () => {
+  it('passes n_threads through to initLlama() when loadModel() is given threads', async () => {
+    const adapter = new LlamaCppCapacitorAdapter();
+    await adapter.loadModel({ modelPath: '/abs/model.gguf', contextLength: 4096, threads: 4 });
+
+    expect(initLlama).toHaveBeenCalledTimes(1);
+    const params = vi.mocked(initLlama).mock.calls[0]![0] as { n_threads?: number };
+    expect(params.n_threads).toBe(4);
+  });
+
+  it('omits n_threads entirely (not just undefined) when loadModel() is not given threads, preserving the native default', async () => {
+    const adapter = new LlamaCppCapacitorAdapter();
+    await adapter.loadModel({ modelPath: '/abs/model.gguf', contextLength: 4096 });
+
+    expect(initLlama).toHaveBeenCalledTimes(1);
+    const params = vi.mocked(initLlama).mock.calls[0]![0];
+    expect('n_threads' in params).toBe(false);
+  });
+});
 
 describe('LlamaCppCapacitorAdapter.complete() — native-jinja failure fallback', () => {
   it('calls completion() with messages + jinja: true when not skipNativeTemplating, and returns its result on success', async () => {

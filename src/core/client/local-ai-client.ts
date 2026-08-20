@@ -73,6 +73,15 @@ export interface LocalAiConfig {
   maxContextTokens?: number;
   /** Number of chats' session files `SessionCache` keeps on disk (LRU-evicted) — Phase 8, default `3`. See `docs/decisions.md` #8. */
   sessionCacheSlots?: number;
+  /**
+   * CPU-only native-runtime tuning knobs — all optional, all additive
+   * (`undefined` = native default, unchanged behavior for any consumer that
+   * doesn't set them). See
+   * `docs/plans/llama2/2026-08-20-local-ai-perf-tuning-plan.md` §3 (`n_threads`
+   * is currently the only field; `batchSize`/`ubatchSize`/`flashAttention`/
+   * `kvCacheQuant` are later phases of the same plan, not yet wired here).
+   */
+  runtimeTuning?: { threads?: number };
   ports?: Partial<LocalAiPorts>;
   /**
    * Pluggable callback — called for every internal log event regardless of
@@ -546,7 +555,11 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
       // needs a genuine absolute path (see FileSystemPort.toAbsolutePath()'s
       // doc comment).
       const absoluteModelPath = await this.ports.fileSystem.toAbsolutePath(destinationPath);
-      await this.ports.llmRuntime.loadModel({ modelPath: absoluteModelPath, contextLength: artifact.contextLength });
+      await this.ports.llmRuntime.loadModel({
+        modelPath: absoluteModelPath,
+        contextLength: artifact.contextLength,
+        threads: this.config.runtimeTuning?.threads,
+      });
       this.modelLoaded = true;
       // Registers this as "current" even on a completely fresh install (no
       // prior row) — switchModel() needs an accurate baseline to compute
@@ -649,7 +662,11 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
 
     options?.onProgress?.({ key: artifact.filename, kind: 'model', percent: 100, status: 'loading' });
     const absoluteModelPath = await this.ports.fileSystem.toAbsolutePath(destinationPath);
-    await this.ports.llmRuntime.loadModel({ modelPath: absoluteModelPath, contextLength: artifact.contextLength });
+    await this.ports.llmRuntime.loadModel({
+      modelPath: absoluteModelPath,
+      contextLength: artifact.contextLength,
+      threads: this.config.runtimeTuning?.threads,
+    });
     this.modelLoaded = true;
     await this.emit('runtime:model-loaded', { modelId: artifact.id, version: artifact.version });
   }

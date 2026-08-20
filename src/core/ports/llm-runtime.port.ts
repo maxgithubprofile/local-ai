@@ -16,7 +16,15 @@ import type { CompletionInput, CompletionOptions, CompletionStream, CompletionRe
  * that. Either way, callers above `RuntimeFacade` only ever see `messages`.
  */
 export interface LlmRuntimePort {
-  loadModel(options: { modelPath: string; contextLength: number }): Promise<void>;
+  /**
+   * `threads` is optional and additive — `undefined` means "don't pass
+   * anything, let the native runtime keep its own default", exactly like
+   * every other tuning knob on this port. See
+   * `docs/plans/llama2/2026-08-20-local-ai-perf-tuning-plan.md` §3 for why
+   * this exists (CPU-only Android perf tuning, TZ-adjacent but not a TZ
+   * phase).
+   */
+  loadModel(options: { modelPath: string; contextLength: number; threads?: number }): Promise<void>;
   loadEmbeddingModel(options: { modelPath: string }): Promise<void>;
 
   /** Releases the LLM context only — leaves the embedding context (if loaded) untouched. TZ §5.5. */

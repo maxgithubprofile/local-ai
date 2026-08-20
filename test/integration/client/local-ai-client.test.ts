@@ -273,6 +273,44 @@ describe('LocalAiClient', () => {
     expect(rawPathsSeen).toContain(ports.fileSystem.resolvePath('embeddings', 'embedding.gguf'));
   });
 
+  // perf-tuning plan §3 (docs/plans/llama2/2026-08-20-local-ai-perf-tuning-plan.md):
+  // config.runtimeTuning.threads must reach llmRuntime.loadModel() unchanged,
+  // and stay entirely absent (undefined, not e.g. coerced to 0) when unset —
+  // preserving the native runtime's own default for any consumer that
+  // doesn't configure it.
+  describe('runtimeTuning.threads (perf-tuning plan §3)', () => {
+    it('forwards config.runtimeTuning.threads to llmRuntime.loadModel()', async () => {
+      const client = await LocalAiClient.create({ manifestUrl, ports, runtimeTuning: { threads: 4 } });
+      await client.refreshManifest();
+
+      await client.ensureModelReady();
+
+      expect(llmRuntime.loadModelCalls).toHaveLength(1);
+      expect(llmRuntime.loadModelCalls[0]!.threads).toBe(4);
+    });
+
+    it('leaves threads undefined when runtimeTuning is not configured at all', async () => {
+      const client = await LocalAiClient.create({ manifestUrl, ports });
+      await client.refreshManifest();
+
+      await client.ensureModelReady();
+
+      expect(llmRuntime.loadModelCalls).toHaveLength(1);
+      expect(llmRuntime.loadModelCalls[0]!.threads).toBeUndefined();
+    });
+
+    it('forwards the new runtimeTuning.threads to loadModel() again on switchModel() (independent reload call site)', async () => {
+      const client = await LocalAiClient.create({ manifestUrl, ports, runtimeTuning: { threads: 2 } });
+      await client.refreshManifest();
+      await client.ensureModelReady();
+
+      await client.switchModel();
+
+      expect(llmRuntime.loadModelCalls).toHaveLength(2);
+      expect(llmRuntime.loadModelCalls[1]!.threads).toBe(2);
+    });
+  });
+
   // getDownloadProgress() — added 2026-08-19 so a consumer can show "resume
   // from X%" before the user taps download, rather than only finding out
   // once ensureModelReady() is already moving (docs/decisions.md's

@@ -60,8 +60,17 @@ export class LlamaCppCapacitorAdapter implements LlmRuntimePort {
   private llmContext: LlamaContext | null = null;
   private embeddingContext: LlamaContext | null = null;
 
-  async loadModel(options: { modelPath: string; contextLength: number }): Promise<void> {
-    this.llmContext = await initLlama({ model: options.modelPath, n_ctx: options.contextLength, embedding: false });
+  async loadModel(options: { modelPath: string; contextLength: number; threads?: number }): Promise<void> {
+    this.llmContext = await initLlama({
+      model: options.modelPath,
+      n_ctx: options.contextLength,
+      embedding: false,
+      // Only set when the caller actually configured it — omitting the key
+      // entirely (not just `undefined`) preserves the plugin's own native
+      // thread-count default for every consumer that hasn't opted in, per
+      // this port's own doc comment.
+      ...(options.threads !== undefined ? { n_threads: options.threads } : {}),
+    });
   }
 
   async loadEmbeddingModel(options: { modelPath: string }): Promise<void> {
