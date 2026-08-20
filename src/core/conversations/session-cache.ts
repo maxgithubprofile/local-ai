@@ -110,6 +110,16 @@ export class SessionCache {
   /** Persists the current runtime KV state as `chatId`'s session file — call after a completed generation (TZ §9.3 step 4). Counts as a touch; may evict a different, older slot if this pushes the cache past `maxSlots`. */
   async save(chatId: string, modelFingerprint: string): Promise<void> {
     const path = this.sessionPath(chatId, modelFingerprint);
+    // `llmRuntime.saveSession()` writes directly through the native runtime
+    // binding via a raw filesystem path, bypassing this port's own
+    // `writeFile()`/`appendFile()` (which auto-create parent directories) —
+    // nothing else in this class's lifecycle ever creates the `sessions/`
+    // directory, so the very first save on a fresh install/chat always
+    // failed silently until this was added. Confirmed live on Android,
+    // 2026-08-20 — see `docs/decisions.md`. `mkdir` throwing because the
+    // directory already exists (the common case after the first save) is
+    // not an error worth surfacing here.
+    await this.fileSystem.mkdir(this.fileSystem.resolvePath('sessions'), { recursive: true }).catch(() => undefined);
     await this.llmRuntime.saveSession(await this.fileSystem.toAbsolutePath(path));
     await this.touch(chatId, modelFingerprint);
   }

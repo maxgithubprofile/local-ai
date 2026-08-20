@@ -47,4 +47,15 @@ describe('CapacitorFsAdapter.toAbsolutePath()', () => {
 
     expect(result).toBe('/data/user/0/com.forta.chat/files/models/a.gguf');
   });
+
+  it('decodes percent-encoded characters — confirmed live on Android, 2026-08-20: a `:` in a session filename came back as %3A and broke saveSession/loadSession path matching', async () => {
+    mockGetUri.mockResolvedValue({
+      uri: 'file:///data/user/0/com.forta.chat/files/sessions/session-abc-qwen3-4b%3A1.bin',
+    });
+    const adapter = new CapacitorFsAdapter();
+
+    const result = await adapter.toAbsolutePath('sessions/session-abc-qwen3-4b:1.bin');
+
+    expect(result).toBe('/data/user/0/com.forta.chat/files/sessions/session-abc-qwen3-4b:1.bin');
+  });
 });

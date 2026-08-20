@@ -146,7 +146,13 @@ describe('SessionCache', () => {
       toAbsolutePath: async (p) => {
         rawPathsSeen.push(p);
         const real = await fileSystem.toAbsolutePath(p);
-        return path.join(path.dirname(real), 'resolved-marker', path.basename(real));
+        // Filename-level marker, not a new directory level — SessionCache's
+        // own mkdir() (session-cache.ts) creates the *port's* "sessions"
+        // dir, which a real toAbsolutePath() (rename/decode only, see
+        // CapacitorFsAdapter's own doc comment) never disagrees with; a
+        // fake that invented an extra directory here would need its own
+        // mkdir too, which isn't what this test is checking.
+        return path.join(path.dirname(real), `resolved-marker-${path.basename(real)}`);
       },
     };
     const wrapped = new SessionCache(runtime, wrappedFs);

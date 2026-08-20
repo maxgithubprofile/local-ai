@@ -465,3 +465,43 @@ deleteModel()` block both use a dedicated ~60MB payload (not the suites' usual f
 specifically so there's a real window to catch a transfer mid-flight before it completes — a first
 draft using the small shared fixture passed all assertions vacuously (the "pause" landed after the
 tiny download had already finished).
+
+### Session persistence was permanently broken on Android — two bugs found verifying the `llama-cpp-pro` migration (2026-08-20)
+
+**Context:** Real-device pass of `docs/adr/0008-llama-cpp-pro-migration.md`'s §7 checklist (see that
+ADR for the migration itself). The very first message sent through an existing AI chat produced
+`E/LlamaCpp: saveSession failed: Failed to save session to:
+/data/user/0/com.forta.chat/files/sessions/session-<chatId>-qwen3-4b%3A1.bin` right after a
+successful, complete generation (238 tokens, correct EOS stop — the migration itself was fine). Two
+independent bugs, both in `local-ai`, both predating this migration (would have affected
+`llama-cpp-capacitor@0.1.5` identically — this explains the "did `saveSession`/`loadSession` ever
+actually work on Android?" open question ADR 0008 flagged, just not for the reason it guessed):
+
+1. **`sessions/` directory never created.** `SessionCache.save()` hands `llmRuntime.saveSession()` a
+   raw absolute path computed via `fileSystem.toAbsolutePath()` — that call goes straight to the
+   native runtime binding, bypassing this port's own `writeFile()`/`appendFile()` (which auto-create
+   parent directories via their own `mkdir()` call). Nothing else in `SessionCache`'s lifecycle ever
+   created `sessions/`, so the very first save on any chat, on a fresh install, always failed.
+   Confirmed via `adb shell run-as com.forta.chat ls files/sessions/` → `No such file or directory`
+   after a completed generation on-device. **Fix:** `SessionCache.save()` now calls
+   `fileSystem.mkdir(fileSystem.resolvePath('sessions'), { recursive: true })` before
+   `llmRuntime.saveSession()`. `FakeLlmRuntimeAdapter.saveSession()` (`node-testing`) used to paper
+   over this by auto-`mkdir`-ing itself — removed, so the fake now matches the real native plugin's
+   behavior and the existing `session-cache.test.ts` suite actually exercises this path.
+2. **`CapacitorFsAdapter.toAbsolutePath()` didn't decode the URI it got back.** `Filesystem.getUri()`
+   correctly returns a percent-encoded `file://` URI; the model fingerprint's own `:` separator (e.g.
+   `qwen3-4b:1`) came back as `%3A`. The stripped-prefix result was handed to the native plugin as a
+   literal path — meaning `saveSession()`/`loadSession()` would target a *different* filename
+   (`...4b%3A1.bin`) than `exists()`/`stat()` (which resolve through the plugin's own
+   already-decoded path handling, `...4b:1.bin`) could ever find again, permanently — a working
+   `saveSession()` still wouldn't have made session caching work. **Fix:** `decodeURIComponent()` the
+   stripped URI before returning. Pinned by a new
+   `test/unit/adapters/capacitor-fs.adapter.test.ts` case with a `%3A` fixture.
+
+**Both bugs are fixed in `local-ai` as of this entry** — not yet re-verified end-to-end on-device
+(session save/load timing comparison, ADR 0008 §7 item 1) at the time of writing; that's the next
+step in the same device-ai-loop session. Neither needed a slow/low-end device to exist — a mid-range
+phone was enough, same lesson as the two SQLite bugs above: this class of bug is invisible to
+`pnpm test` not because it's inherently hard to catch, but because the Node-fake adapters
+(`NodeFsAdapter`, `FakeLlmRuntimeAdapter`) were both slightly *more* forgiving than the real native
+plugin/Capacitor Filesystem behavior they stand in for.

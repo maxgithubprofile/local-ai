@@ -1,5 +1,4 @@
 import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
 import type { LlmRuntimePort } from '../../core/ports/llm-runtime.port.js';
 import type { CompletionInput, CompletionResult, CompletionStream, CompletionToken } from '../../core/types.js';
 import { AsyncTokenQueue } from '../../core/utils/async-token-queue.js';
@@ -109,10 +108,19 @@ export class FakeLlmRuntimeAdapter implements LlmRuntimePort {
    * decides cold-start-vs-cache-hit by checking `FileSystemPort.exists()`
    * on it — a no-op fake here would silently break every
    * `SessionCache` test that checks for the file's presence.
+   *
+   * Deliberately does **not** create `sessionPath`'s parent directory —
+   * confirmed live on Android, 2026-08-20, that the real native plugin
+   * (`llama-cpp-pro`'s `saveSessionNative`) doesn't either, and nothing else
+   * in `SessionCache`'s lifecycle used to create `sessions/` before the
+   * first save. This fake used to auto-`mkdir` here, which meant this exact
+   * bug (every session save on a fresh install/chat silently failing) had
+   * no way to reproduce in `pnpm test` — the fix now lives in
+   * `SessionCache.save()` itself, so this fake matches the real plugin's
+   * behavior instead of papering over the gap.
    */
   async saveSession(sessionPath: string): Promise<void> {
     this.savedSessionPaths.push(sessionPath);
-    await fs.mkdir(path.dirname(sessionPath), { recursive: true });
     await fs.writeFile(sessionPath, 'fake-session-marker');
   }
 

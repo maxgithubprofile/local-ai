@@ -45,10 +45,23 @@ export class CapacitorFsAdapter implements FileSystemPort {
    * turning a `{path, directory}` pair into a real filesystem URI — used
    * wherever a path needs to leave this port's own relative+directory
    * convention (see `FileSystemPort.toAbsolutePath()`'s doc comment).
+   *
+   * The returned `uri` is percent-encoded (it's a URI, not a raw path) —
+   * `decodeURIComponent()` here is required, not cosmetic. Confirmed live on
+   * Android, 2026-08-20: a session filename containing `:` (the model
+   * fingerprint's own separator, e.g. `qwen3-4b:1`) came back from
+   * `getUri()` as `...qwen3-4b%3A1.bin`; every caller of this method hands
+   * the result straight to the native `LlmRuntimePort` binding, which treats
+   * it as a literal filesystem path, not a URI — so `saveSession()` silently
+   * wrote to a *different* filename than `exists()`/`stat()` (which resolve
+   * through the plugin's own already-decoded path handling) would ever find
+   * again. Session persistence was effectively permanently broken until
+   * this was fixed — see `docs/decisions.md`.
    */
   async toAbsolutePath(path: string): Promise<string> {
     const { uri } = await Filesystem.getUri({ path, directory: this.directory });
-    return uri.startsWith('file://') ? uri.slice('file://'.length) : uri;
+    const stripped = uri.startsWith('file://') ? uri.slice('file://'.length) : uri;
+    return decodeURIComponent(stripped);
   }
 
   async exists(path: string): Promise<boolean> {
