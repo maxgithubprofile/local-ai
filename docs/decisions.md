@@ -763,3 +763,40 @@ memory-bandwidth-bound rather than thread-count-bound past a fairly low core cou
 **not resolved** by this pass — the plumbing is verified correct end-to-end, but the specific value
 chosen isn't shown to help yet. Next measurement before touching the cap: rerun the identical method
 with `runtimeTuning.threads: 8` on this same device and compare.
+
+### `sanitize_utf8()` was truncating whole AI replies at one bad byte, not just a trailing cutoff (2026-08-20)
+
+**Found by the user, eyeballing the screen** after the `n_threads` device pass above — the on-device
+cat-story reply (315 tokens, natural EOS stop per the logcat entry above) rendered and persisted cut
+off mid-sentence at roughly 40% of its length, with a stray glyph visible right at the cut point during
+live streaming ("я еще видел как раз в месте обрезки какой-то utf символ"). Confirmed as real data loss,
+not a UI rendering artifact, by pulling `forta.chat`'s SQLite `chat_messages` row directly (same
+exec-out method as the baseline entry above): `status: 'complete'`, `token_count: 315` (correct, matches
+the native `tokens_predicted` counter), but `content` cut off at the exact same point shown on screen.
+
+**Root cause**, `llama-cpp-pro`'s (patched) `jni.cpp`, `jni_utils::sanitize_utf8()` — added by an earlier
+session's patch (this same `docs/decisions.md`, "no per-token streaming on Android" era work) to stop
+`env->NewStringUTF()` aborting the whole app on invalid Modified UTF-8. That function scanned the fully
+generated response for the first invalid UTF-8 byte and **truncated the entire string from there on**
+(`return s.substr(0, i)`) — correct for the case it was written for (a hard `n_predict` cutoff landing
+mid-character at the very end of generation) but wrong for a single malformed byte anywhere earlier in
+an otherwise-complete, EOS-terminated reply. Byte-level BPE tokenizers (Qwen included) can emit a token
+whose raw text isn't valid UTF-8 on its own; one such token mid-response was enough to silently discard
+everything the model generated after it — while `tokens_generated` (a separate `int` counter, unaffected
+by the string truncation) kept counting correctly, which is why `token_count` in the DB looked fine and
+masked the bug from anything that only checked that field.
+
+**Fix**: rewrote `sanitize_utf8()` to keep scanning the whole string and only *drop* the specific
+offending byte(s), instead of stopping at the first one — the output is still built exclusively from
+validated complete UTF-8 sequences (same `NewStringUTF()`-safety guarantee as before), but one bad byte
+now costs at most one character instead of the rest of the reply. Patch regenerated via
+`npx patch-package llama-cpp-pro` — first had to delete
+`node_modules/llama-cpp-pro/android/{build,.cxx}` (leftover Gradle/CMake build output containing paths
+too long for git's index on Windows, which made patch-package's own internal `git add` step fail with
+`Filename too long` / a confusing downstream `Argument list too long` if not cleaned first).
+
+**Re-verified on the same device, same method** (adb logcat + direct SQLite pull, not just eyeballing
+the screen): a fresh 246-token reply to the identical prompt persisted end-to-end with a genuine
+narrative conclusion, no mid-sentence cut. Full technical detail and the regenerated patch diff live in
+`forta.chat`'s own commit on `llama2-perf` (same date) — this entry is the cross-reference for anyone
+reading `local-ai`'s own history first.
