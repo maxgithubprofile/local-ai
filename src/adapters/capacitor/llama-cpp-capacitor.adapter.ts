@@ -18,7 +18,7 @@ function toOaiMessages(messages: CompletionInput['messages']): LlamaCppOAICompat
 
 function samplingParams(options: CompletionInput['options']): Pick<
   CompletionParams,
-  'n_predict' | 'temperature' | 'top_p' | 'top_k' | 'seed' | 'stop'
+  'n_predict' | 'temperature' | 'top_p' | 'top_k' | 'seed' | 'stop' | 'enable_thinking'
 > {
   return {
     n_predict: options?.maxTokens,
@@ -27,6 +27,7 @@ function samplingParams(options: CompletionInput['options']): Pick<
     top_k: options?.topK,
     seed: options?.seed,
     stop: options?.stop,
+    enable_thinking: options?.enableThinking,
   };
 }
 

@@ -70,6 +70,28 @@ describe('LlamaCppCapacitorAdapter.complete() — native-jinja failure fallback'
     expect(params.messages).toEqual([{ role: 'user', content: 'привет' }]);
   });
 
+  it('passes enable_thinking through to completion() when complete() is given options.enableThinking (perf-tuning plan §4)', async () => {
+    mockCompletion.mockResolvedValue({ content: 'hi there', interrupted: false, tokens_predicted: 3 });
+    const adapter = await loadedAdapter();
+
+    await adapter.complete({ messages, options: { enableThinking: false } }).result;
+
+    expect(mockCompletion).toHaveBeenCalledTimes(1);
+    const params = mockCompletion.mock.calls[0]![0] as { enable_thinking?: boolean };
+    expect(params.enable_thinking).toBe(false);
+  });
+
+  it('leaves enable_thinking undefined when complete() is not given options.enableThinking', async () => {
+    mockCompletion.mockResolvedValue({ content: 'hi there', interrupted: false, tokens_predicted: 3 });
+    const adapter = await loadedAdapter();
+
+    await adapter.complete({ messages }).result;
+
+    expect(mockCompletion).toHaveBeenCalledTimes(1);
+    const params = mockCompletion.mock.calls[0]![0] as { enable_thinking?: boolean };
+    expect(params.enable_thinking).toBeUndefined();
+  });
+
   it('retries once with a ChatML-formatted prompt when the native-jinja attempt throws before any token streamed', async () => {
     mockCompletion
       .mockRejectedValueOnce(new Error("Cannot destructure property 'minja' of 'this.model.chatTemplates' as it is undefined."))

@@ -800,3 +800,44 @@ the screen): a fresh 246-token reply to the identical prompt persisted end-to-en
 narrative conclusion, no mid-sentence cut. Full technical detail and the regenerated patch diff live in
 `forta.chat`'s own commit on `llama2-perf` (same date) — this entry is the cross-reference for anyone
 reading `local-ai`'s own history first.
+
+### `enable_thinking: false` device-verified through the native jinja path, not the ChatML fallback (2026-08-20)
+
+Perf-tuning plan §4 (`forta.chat`'s `docs/plans/llama2/2026-08-20-local-ai-perf-tuning-plan.md`).
+`CompletionOptions.enableThinking?: boolean` added to `core/types.ts`; `LlamaCppCapacitorAdapter`'s
+`samplingParams()` forwards it as `enable_thinking` on both `CompletionParams` objects it builds
+(`nativeJinjaParams`/`callerFormattedParams` — the ChatML-fallback path has its own, separate
+skip-thinking mechanism, an already-closed `<think></think>` prefix, see that path's own doc comment
+for why `enable_thinking` can't reach it). `forta.chat`'s `ai-chat-store.ts` now sends
+`completionOptions: { enableThinking: false }` on every `sendMessage()`.
+
+**First verification attempt was a false positive from a broken DOM-polling script**, worth recording
+so it isn't repeated: a CDP script sent the prompt, then polled `document`'s visible text nodes for
+"whatever text sits near the sent message" as a stand-in for the reply. The composer navigates back to
+the plain chat list right after send (by design, not a bug), and once there, the "nearest text" heuristic
+happily matched an unrelated chat row's preview text several screens away — the script reported PASS in
+under 20s, impossible for this device's ~1 tok/s. Deleted rather than fixed; DOM polling is the wrong
+tool for reading a reply's content on this app (`device-ai-loop.md` already says as much for timing
+measurements — this extends the same lesson to content checks).
+
+**Real verification**: direct `adb logcat` read of the native `LlamaCpp` bridge, same method as the
+`n_threads`/baseline entries above. `initContext()`'s log line confirmed the loaded GGUF's
+`chatTemplates` includes a working `minja` template (`"chatTemplates":{"minja":{"default":true,...}}`)
+— i.e. this run went through mechanism 1 (native jinja), not the ChatML fallback, so `enable_thinking`
+was actually exercised, not bypassed. The token-generation log starts directly with the story
+(`Generated token 1 (ID: 132042): Ж`, `token 2: ила`, spelling out "Жила-была кошка...") — zero `<think>`
+tokens at any point. The final `completion()` result object, also visible in logcat
+(`Capacitor/Console` bridging the native JSON back to JS), confirms it structurally:
+`"reasoning_content":""`, `"content":"Жила-была кошка по имени Мурка...` (straight into the story),
+`"stopped_eos":true`, `"tokens_predicted":166` — a clean, natural completion with no reasoning phase at
+all. Two earlier "successful" cat-story replies found in the same SQLite pull (16:05/16:44 UTC) turned
+out to predate this session's `cap:run` redeploy (~17:11 UTC) — leftover data from the prior
+(`n_threads`-only) build, not evidence for this change; timestamps matter when cross-checking SQLite
+against a deploy.
+
+Also worth noting for the next person pulling this device's SQLite over `adb`: `adb shell run-as ... cat
+> file` through PowerShell's `>` redirection prepends a UTF-8 BOM (text-mode encoding), corrupting the
+`SQLite format 3` header. `adb exec-out` alone isn't sufficient on this shell — route the bytes through
+a `spawnSync(..., { encoding: undefined })`-style raw Buffer capture (Node) rather than a shell `>`
+redirect, or the pulled file silently isn't a valid SQLite database (`ERR_SQLITE_ERROR: file is not a
+database` when opened).

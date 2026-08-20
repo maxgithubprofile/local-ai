@@ -12,6 +12,18 @@ export interface CompletionOptions {
   repeatPenalty?: number;
   seed?: number;
   stop?: string[];
+  /**
+   * Skip a reasoning-capable model's `<think>...</think>` phase before the
+   * real answer — perf-tuning plan §4 (`docs/plans/llama2/2026-08-20-local-ai-perf-tuning-plan.md`
+   * in the `forta.chat` repo). `undefined` = don't touch it, plugin/model
+   * decide on their own (library stays unopinionated, same pattern as
+   * `autoUnloadOnBackground`'s own default). Only takes effect through the
+   * plugin's native jinja templating (mechanism 1) — the ChatML fallback
+   * path in `LlamaCppCapacitorAdapter` handles "skip thinking" a different
+   * way (an already-closed `<think></think>` prefix) because that path
+   * never goes through templating at all.
+   */
+  enableThinking?: boolean;
 }
 
 /**
