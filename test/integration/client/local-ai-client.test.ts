@@ -352,6 +352,85 @@ describe('LocalAiClient', () => {
     });
   });
 
+  // perf-tuning plan §6 (docs/plans/llama2/2026-08-20-local-ai-perf-tuning-plan.md):
+  // same additive plumbing as §3/§5's threads/batchSize/ubatchSize tests
+  // above, plus resolveRuntimeTuning()'s own guard — kvCacheQuant without
+  // flashAttention: true is dropped before loadModel(), not thrown.
+  describe('runtimeTuning.flashAttention/kvCacheQuant (perf-tuning plan §6)', () => {
+    it('forwards config.runtimeTuning.flashAttention/kvCacheQuant to llmRuntime.loadModel() when paired correctly', async () => {
+      const client = await LocalAiClient.create({ manifestUrl, ports, runtimeTuning: { flashAttention: true, kvCacheQuant: 'q8_0' } });
+      await client.refreshManifest();
+
+      await client.ensureModelReady();
+
+      expect(llmRuntime.loadModelCalls).toHaveLength(1);
+      expect(llmRuntime.loadModelCalls[0]!.flashAttention).toBe(true);
+      expect(llmRuntime.loadModelCalls[0]!.kvCacheQuant).toBe('q8_0');
+    });
+
+    it('leaves flashAttention/kvCacheQuant undefined when runtimeTuning is not configured at all', async () => {
+      const client = await LocalAiClient.create({ manifestUrl, ports });
+      await client.refreshManifest();
+
+      await client.ensureModelReady();
+
+      expect(llmRuntime.loadModelCalls).toHaveLength(1);
+      expect(llmRuntime.loadModelCalls[0]!.flashAttention).toBeUndefined();
+      expect(llmRuntime.loadModelCalls[0]!.kvCacheQuant).toBeUndefined();
+    });
+
+    it('drops kvCacheQuant (warn-logged, not thrown) when flashAttention is not also set', async () => {
+      // Not toHaveBeenCalledTimes(1) — boot-time self-tests (sqlite-vec/FTS5
+      // fallback checks) also log through the same config.logger.warn and
+      // are unrelated to this guard; match on message content instead.
+      const warn = vi.fn();
+      const client = await LocalAiClient.create({
+        manifestUrl,
+        ports,
+        runtimeTuning: { kvCacheQuant: 'q4_0' },
+        logger: { debug: () => {}, info: () => {}, warn, error: () => {} },
+      });
+      await client.refreshManifest();
+
+      await client.ensureModelReady();
+
+      expect(llmRuntime.loadModelCalls).toHaveLength(1);
+      expect(llmRuntime.loadModelCalls[0]!.kvCacheQuant).toBeUndefined();
+      expect(llmRuntime.loadModelCalls[0]!.flashAttention).toBeUndefined();
+      const kvCacheWarning = warn.mock.calls.find((call) => /kvCacheQuant.*flashAttention/.test(String(call[0])));
+      expect(kvCacheWarning).toBeDefined();
+    });
+
+    it('does not warn about kvCacheQuant/flashAttention when they are paired correctly', async () => {
+      const warn = vi.fn();
+      const client = await LocalAiClient.create({
+        manifestUrl,
+        ports,
+        runtimeTuning: { flashAttention: true, kvCacheQuant: 'q4_0' },
+        logger: { debug: () => {}, info: () => {}, warn, error: () => {} },
+      });
+      await client.refreshManifest();
+
+      await client.ensureModelReady();
+
+      expect(llmRuntime.loadModelCalls[0]!.kvCacheQuant).toBe('q4_0');
+      const kvCacheWarning = warn.mock.calls.find((call) => /kvCacheQuant.*flashAttention/.test(String(call[0])));
+      expect(kvCacheWarning).toBeUndefined();
+    });
+
+    it('forwards the new runtimeTuning.flashAttention/kvCacheQuant to loadModel() again on switchModel() (independent reload call site)', async () => {
+      const client = await LocalAiClient.create({ manifestUrl, ports, runtimeTuning: { flashAttention: true, kvCacheQuant: 'f16' } });
+      await client.refreshManifest();
+      await client.ensureModelReady();
+
+      await client.switchModel();
+
+      expect(llmRuntime.loadModelCalls).toHaveLength(2);
+      expect(llmRuntime.loadModelCalls[1]!.flashAttention).toBe(true);
+      expect(llmRuntime.loadModelCalls[1]!.kvCacheQuant).toBe('f16');
+    });
+  });
+
   // perf-tuning plan §7 (docs/plans/llama2/2026-08-20-local-ai-perf-tuning-plan.md):
   // ensureModelReady() fires a best-effort, non-awaited bench() after a
   // fresh load and records 'tooSlow' when tgAvg is under the threshold —

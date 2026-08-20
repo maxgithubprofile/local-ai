@@ -5,7 +5,7 @@ import { initLlama } from 'llama-cpp-pro';
 // `LlamaCppOAICompatibleMessage` but isn't what TS actually resolves)
 // exports this same shape only under its `RNLlama*` legacy alias.
 import type { LlamaContext, RNLlamaOAICompatibleMessage as LlamaCppOAICompatibleMessage, CompletionParams } from 'llama-cpp-pro';
-import type { LlmRuntimePort } from '../../core/ports/llm-runtime.port.js';
+import type { LlmRuntimePort, KvCacheQuant } from '../../core/ports/llm-runtime.port.js';
 import type { CompletionInput, CompletionResult, CompletionStream, CompletionToken } from '../../core/types.js';
 import { RuntimeInitError } from '../../core/errors.js';
 import { AsyncTokenQueue } from '../../core/utils/async-token-queue.js';
@@ -67,6 +67,8 @@ export class LlamaCppCapacitorAdapter implements LlmRuntimePort {
     threads?: number;
     batchSize?: number;
     ubatchSize?: number;
+    flashAttention?: boolean;
+    kvCacheQuant?: KvCacheQuant;
   }): Promise<void> {
     this.llmContext = await initLlama({
       model: options.modelPath,
@@ -75,10 +77,16 @@ export class LlamaCppCapacitorAdapter implements LlmRuntimePort {
       // Only set when the caller actually configured it — omitting the key
       // entirely (not just `undefined`) preserves the plugin's own native
       // defaults for every consumer that hasn't opted in, per this port's
-      // own doc comment.
+      // own doc comment. kvCacheQuant maps to both cache_type_k/v (one knob
+      // for both, per the port's own doc comment) — LocalAiClient's
+      // resolveRuntimeTuning() already guarantees it never arrives here
+      // without flashAttention: true, so this adapter doesn't re-validate
+      // that pairing itself.
       ...(options.threads !== undefined ? { n_threads: options.threads } : {}),
       ...(options.batchSize !== undefined ? { n_batch: options.batchSize } : {}),
       ...(options.ubatchSize !== undefined ? { n_ubatch: options.ubatchSize } : {}),
+      ...(options.flashAttention !== undefined ? { flash_attn: options.flashAttention } : {}),
+      ...(options.kvCacheQuant !== undefined ? { cache_type_k: options.kvCacheQuant, cache_type_v: options.kvCacheQuant } : {}),
     });
   }
 

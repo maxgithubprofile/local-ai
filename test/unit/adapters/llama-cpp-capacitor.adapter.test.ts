@@ -87,6 +87,48 @@ describe('LlamaCppCapacitorAdapter.loadModel() — n_batch/n_ubatch plumbing (pe
   });
 });
 
+describe('LlamaCppCapacitorAdapter.loadModel() — flash_attn/cache_type_k/v plumbing (perf-tuning plan §6)', () => {
+  it('passes flash_attn through to initLlama() when loadModel() is given flashAttention', async () => {
+    const adapter = new LlamaCppCapacitorAdapter();
+    await adapter.loadModel({ modelPath: '/abs/model.gguf', contextLength: 4096, flashAttention: true });
+
+    expect(initLlama).toHaveBeenCalledTimes(1);
+    const params = vi.mocked(initLlama).mock.calls[0]![0] as { flash_attn?: boolean };
+    expect(params.flash_attn).toBe(true);
+  });
+
+  it('maps kvCacheQuant to both cache_type_k and cache_type_v (one knob for both, per the port doc comment)', async () => {
+    const adapter = new LlamaCppCapacitorAdapter();
+    await adapter.loadModel({ modelPath: '/abs/model.gguf', contextLength: 4096, flashAttention: true, kvCacheQuant: 'q8_0' });
+
+    expect(initLlama).toHaveBeenCalledTimes(1);
+    const params = vi.mocked(initLlama).mock.calls[0]![0] as { cache_type_k?: string; cache_type_v?: string };
+    expect(params.cache_type_k).toBe('q8_0');
+    expect(params.cache_type_v).toBe('q8_0');
+  });
+
+  it('omits flash_attn/cache_type_k/cache_type_v entirely when neither flashAttention nor kvCacheQuant is given, preserving the native default', async () => {
+    const adapter = new LlamaCppCapacitorAdapter();
+    await adapter.loadModel({ modelPath: '/abs/model.gguf', contextLength: 4096 });
+
+    expect(initLlama).toHaveBeenCalledTimes(1);
+    const params = vi.mocked(initLlama).mock.calls[0]![0];
+    expect('flash_attn' in params).toBe(false);
+    expect('cache_type_k' in params).toBe(false);
+    expect('cache_type_v' in params).toBe(false);
+  });
+
+  it('passes kvCacheQuant through as-is even without flashAttention — LocalAiClient is responsible for that guard, not this adapter', async () => {
+    const adapter = new LlamaCppCapacitorAdapter();
+    await adapter.loadModel({ modelPath: '/abs/model.gguf', contextLength: 4096, kvCacheQuant: 'q4_0' });
+
+    expect(initLlama).toHaveBeenCalledTimes(1);
+    const params = vi.mocked(initLlama).mock.calls[0]![0] as { cache_type_k?: string; flash_attn?: boolean };
+    expect(params.cache_type_k).toBe('q4_0');
+    expect('flash_attn' in params).toBe(false);
+  });
+});
+
 describe('LlamaCppCapacitorAdapter.complete() — native-jinja failure fallback', () => {
   it('calls completion() with messages + jinja: true when not skipNativeTemplating, and returns its result on success', async () => {
     mockCompletion.mockResolvedValue({ content: 'hi there', interrupted: false, tokens_predicted: 3 });

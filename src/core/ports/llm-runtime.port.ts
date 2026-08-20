@@ -1,6 +1,16 @@
 import type { CompletionInput, CompletionOptions, CompletionStream, CompletionResult, CompletionToken } from '../types.js';
 
 /**
+ * KV-cache quantization type, perf-tuning plan §6 — deliberately a narrower
+ * subset of what the underlying plugin's `cache_type_k`/`cache_type_v`
+ * actually accept (`llama-cpp-pro`'s `ContextParams` also allows `'f32'`,
+ * `'q4_1'`, `'iq4_nl'`, `'q5_0'`, `'q5_1'`, ...) — these are the only three
+ * this port promises to support, keeping the tuning surface small and
+ * intentional rather than a pass-through of every native option.
+ */
+export type KvCacheQuant = 'f16' | 'q8_0' | 'q4_0';
+
+/**
  * Port over the native inference runtime — TZ §4.1. The production adapter
  * wraps `llama-cpp-pro` (formerly `llama-cpp-capacitor`, see
  * `docs/adr/0008-llama-cpp-pro-migration.md`) (`initLlama`/`completion`/`embedding`/
@@ -17,12 +27,19 @@ import type { CompletionInput, CompletionOptions, CompletionStream, CompletionRe
  */
 export interface LlmRuntimePort {
   /**
-   * `threads`/`batchSize`/`ubatchSize` are optional and additive —
-   * `undefined` means "don't pass anything, let the native runtime keep its
-   * own default", exactly like every other tuning knob on this port. See
+   * `threads`/`batchSize`/`ubatchSize`/`flashAttention`/`kvCacheQuant` are
+   * all optional and additive — `undefined` means "don't pass anything, let
+   * the native runtime keep its own default", exactly like every other
+   * tuning knob on this port. See
    * `docs/plans/llama2/2026-08-20-local-ai-perf-tuning-plan.md` §3
-   * (`threads`) and §5 (`batchSize`/`ubatchSize`) for why these exist
-   * (CPU-only Android perf tuning, TZ-adjacent but not a TZ phase).
+   * (`threads`), §5 (`batchSize`/`ubatchSize`) and §6
+   * (`flashAttention`/`kvCacheQuant`) for why these exist (CPU-only Android
+   * perf tuning, TZ-adjacent but not a TZ phase). Unlike the others,
+   * `kvCacheQuant` is not just "pass it or don't" — pairing it with
+   * `flashAttention: false`/unset is a combination llama.cpp historically
+   * doesn't support cleanly, so `LocalAiClient` (not this port) validates
+   * that pairing before ever calling `loadModel()` — see its own
+   * `resolveRuntimeTuning()` doc comment.
    */
   loadModel(options: {
     modelPath: string;
@@ -30,6 +47,8 @@ export interface LlmRuntimePort {
     threads?: number;
     batchSize?: number;
     ubatchSize?: number;
+    flashAttention?: boolean;
+    kvCacheQuant?: KvCacheQuant;
   }): Promise<void>;
   loadEmbeddingModel(options: { modelPath: string }): Promise<void>;
 

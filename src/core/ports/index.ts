@@ -3,7 +3,7 @@ export type { DeviceInfoPort } from './device-info.port.js';
 export type { DownloadTransportPort } from './download-transport.port.js';
 export type { FileSystemPort } from './filesystem.port.js';
 export type { SqlitePort, SqliteRow } from './sqlite.port.js';
-export type { LlmRuntimePort } from './llm-runtime.port.js';
+export type { LlmRuntimePort, KvCacheQuant } from './llm-runtime.port.js';
 export type { ClockPort } from './clock.port.js';
 export type { HashPort, IncrementalHasher } from './hash.port.js';
 export type { AppLifecyclePort } from './app-lifecycle.port.js';

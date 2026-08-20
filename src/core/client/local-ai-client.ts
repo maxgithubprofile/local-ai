@@ -1,4 +1,4 @@
-import type { LocalAiPorts } from '../ports/index.js';
+import type { LocalAiPorts, KvCacheQuant } from '../ports/index.js';
 import type { SupportReport } from '../support/types.js';
 import type { EligibilityReport } from '../support/types.js';
 import type { ManifestDiff } from '../manifest/manifest.diff.js';
@@ -78,13 +78,21 @@ export interface LocalAiConfig {
    * (`undefined` = native default, unchanged behavior for any consumer that
    * doesn't set them). See
    * `docs/plans/llama2/2026-08-20-local-ai-perf-tuning-plan.md` §3
-   * (`threads`) and §5 (`batchSize`/`ubatchSize` — plumbed here but
-   * deliberately left unset by `forta.chat` until there's a device measurement
-   * pointing at `n_batch` specifically, see the plan's own reasoning);
-   * `flashAttention`/`kvCacheQuant` are a later phase of the same plan, not
-   * yet wired here.
+   * (`threads`), §5 (`batchSize`/`ubatchSize`) and §6
+   * (`flashAttention`/`kvCacheQuant`) — the latter two are plumbed but
+   * deliberately left unset by `forta.chat` until there's a device
+   * measurement in isolation, same reasoning as `batchSize`/`ubatchSize`.
+   * `kvCacheQuant` set without `flashAttention: true` is silently dropped
+   * (warn-logged, not thrown) before ever reaching `LlmRuntimePort.loadModel()`
+   * — see `resolveRuntimeTuning()`'s own doc comment for why.
    */
-  runtimeTuning?: { threads?: number; batchSize?: number; ubatchSize?: number };
+  runtimeTuning?: {
+    threads?: number;
+    batchSize?: number;
+    ubatchSize?: number;
+    flashAttention?: boolean;
+    kvCacheQuant?: KvCacheQuant;
+  };
   /**
    * TZ §6.2's `tooSlow` threshold — `tgAvg < tooSlowTokPerSec` after
    * `LlmRuntimePort.bench()`, recorded as a `LocalRuntimeVerdict` (TZ §6.3)
@@ -487,6 +495,37 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
   }
 
   /**
+   * perf-tuning plan §6's guard, shared by both `loadModel()` call sites
+   * below: `cache_type_k`/`cache_type_v` (KV-cache quantization) is
+   * historically unstable/unsupported in llama.cpp for some type
+   * combinations when `flash_attn` isn't also on — rather than validating
+   * this deep inside the adapter (which has no logger and no config to
+   * check against), resolve the safe pair once here, right before either
+   * `loadModel()` call. `kvCacheQuant` set without `flashAttention: true` is
+   * dropped (warn-logged, never thrown) — `ensureModelReady()`/`switchModel()`
+   * must not fail to load a model over a bad tuning knob; degrading to "just
+   * don't quantize the cache" is safer than refusing to load at all, same
+   * philosophy as this class's other best-effort tuning fallbacks.
+   */
+  private async resolveRuntimeTuning(): Promise<{
+    threads?: number;
+    batchSize?: number;
+    ubatchSize?: number;
+    flashAttention?: boolean;
+    kvCacheQuant?: KvCacheQuant;
+  }> {
+    const tuning = this.config.runtimeTuning ?? {};
+    if (tuning.kvCacheQuant !== undefined && !tuning.flashAttention) {
+      await this.dispatchLog(
+        'warn',
+        `runtimeTuning.kvCacheQuant ('${tuning.kvCacheQuant}') requires runtimeTuning.flashAttention: true — ignoring kvCacheQuant, native cache-type default stays in effect`,
+      );
+      return { ...tuning, kvCacheQuant: undefined };
+    }
+    return tuning;
+  }
+
+  /**
    * Shared wrapper around `DownloadEngine.downloadArtifact()` for every
    * call site below — emits `download:completed` on success or
    * `download:failed` on failure (previously declared in `LocalAiEventMap`
@@ -569,12 +608,15 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
       // needs a genuine absolute path (see FileSystemPort.toAbsolutePath()'s
       // doc comment).
       const absoluteModelPath = await this.ports.fileSystem.toAbsolutePath(destinationPath);
+      const tuning = await this.resolveRuntimeTuning();
       await this.ports.llmRuntime.loadModel({
         modelPath: absoluteModelPath,
         contextLength: artifact.contextLength,
-        threads: this.config.runtimeTuning?.threads,
-        batchSize: this.config.runtimeTuning?.batchSize,
-        ubatchSize: this.config.runtimeTuning?.ubatchSize,
+        threads: tuning.threads,
+        batchSize: tuning.batchSize,
+        ubatchSize: tuning.ubatchSize,
+        flashAttention: tuning.flashAttention,
+        kvCacheQuant: tuning.kvCacheQuant,
       });
       this.modelLoaded = true;
       // Registers this as "current" even on a completely fresh install (no
@@ -694,12 +736,15 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
 
     options?.onProgress?.({ key: artifact.filename, kind: 'model', percent: 100, status: 'loading' });
     const absoluteModelPath = await this.ports.fileSystem.toAbsolutePath(destinationPath);
+    const tuning = await this.resolveRuntimeTuning();
     await this.ports.llmRuntime.loadModel({
       modelPath: absoluteModelPath,
       contextLength: artifact.contextLength,
-      threads: this.config.runtimeTuning?.threads,
-      batchSize: this.config.runtimeTuning?.batchSize,
-      ubatchSize: this.config.runtimeTuning?.ubatchSize,
+      threads: tuning.threads,
+      batchSize: tuning.batchSize,
+      ubatchSize: tuning.ubatchSize,
+      flashAttention: tuning.flashAttention,
+      kvCacheQuant: tuning.kvCacheQuant,
     });
     this.modelLoaded = true;
     await this.emit('runtime:model-loaded', { modelId: artifact.id, version: artifact.version });

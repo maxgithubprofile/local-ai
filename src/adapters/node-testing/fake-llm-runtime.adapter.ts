@@ -1,5 +1,5 @@
 import * as fs from 'node:fs/promises';
-import type { LlmRuntimePort } from '../../core/ports/llm-runtime.port.js';
+import type { LlmRuntimePort, KvCacheQuant } from '../../core/ports/llm-runtime.port.js';
 import type { CompletionInput, CompletionResult, CompletionStream, CompletionToken } from '../../core/types.js';
 import { AsyncTokenQueue } from '../../core/utils/async-token-queue.js';
 
@@ -14,8 +14,16 @@ export class FakeLlmRuntimeAdapter implements LlmRuntimePort {
   readonly completeCalls: Array<{ input: CompletionInput; options?: { skipNativeTemplating?: boolean } }> = [];
   modelLoaded = false;
   embeddingModelLoaded = false;
-  /** Records the exact `modelPath`/`threads`/`batchSize`/`ubatchSize` each call received — lets tests assert `LocalAiClient` resolved the path and forwarded `runtimeTuning.*` correctly. */
-  readonly loadModelCalls: Array<{ modelPath: string; contextLength: number; threads?: number; batchSize?: number; ubatchSize?: number }> = [];
+  /** Records the exact `modelPath`/`threads`/`batchSize`/`ubatchSize`/`flashAttention`/`kvCacheQuant` each call received — lets tests assert `LocalAiClient` resolved the path and forwarded `runtimeTuning.*` correctly. */
+  readonly loadModelCalls: Array<{
+    modelPath: string;
+    contextLength: number;
+    threads?: number;
+    batchSize?: number;
+    ubatchSize?: number;
+    flashAttention?: boolean;
+    kvCacheQuant?: KvCacheQuant;
+  }> = [];
   readonly loadEmbeddingModelCalls: Array<{ modelPath: string }> = [];
 
   /** Tokens to push before settling, and how to settle — configurable per test. */
@@ -30,7 +38,15 @@ export class FakeLlmRuntimeAdapter implements LlmRuntimePort {
   // several pre-existing tests call loadModel()/loadEmbeddingModel() with no
   // args just to flip modelLoaded/embeddingModelLoaded on, and don't care
   // about the path.
-  async loadModel(options?: { modelPath: string; contextLength: number; threads?: number; batchSize?: number; ubatchSize?: number }): Promise<void> {
+  async loadModel(options?: {
+    modelPath: string;
+    contextLength: number;
+    threads?: number;
+    batchSize?: number;
+    ubatchSize?: number;
+    flashAttention?: boolean;
+    kvCacheQuant?: KvCacheQuant;
+  }): Promise<void> {
     if (options) this.loadModelCalls.push(options);
     this.modelLoaded = true;
   }
