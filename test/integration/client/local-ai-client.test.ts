@@ -311,6 +311,47 @@ describe('LocalAiClient', () => {
     });
   });
 
+  // perf-tuning plan §5 (docs/plans/llama2/2026-08-20-local-ai-perf-tuning-plan.md):
+  // same plumbing as §3's threads test above, for config.runtimeTuning.batchSize/
+  // ubatchSize — forta.chat deliberately leaves these unset for now (plan §5),
+  // this only verifies the infrastructure carries them through when a consumer
+  // does set them.
+  describe('runtimeTuning.batchSize/ubatchSize (perf-tuning plan §5)', () => {
+    it('forwards config.runtimeTuning.batchSize/ubatchSize to llmRuntime.loadModel()', async () => {
+      const client = await LocalAiClient.create({ manifestUrl, ports, runtimeTuning: { batchSize: 256, ubatchSize: 128 } });
+      await client.refreshManifest();
+
+      await client.ensureModelReady();
+
+      expect(llmRuntime.loadModelCalls).toHaveLength(1);
+      expect(llmRuntime.loadModelCalls[0]!.batchSize).toBe(256);
+      expect(llmRuntime.loadModelCalls[0]!.ubatchSize).toBe(128);
+    });
+
+    it('leaves batchSize/ubatchSize undefined when runtimeTuning is not configured at all', async () => {
+      const client = await LocalAiClient.create({ manifestUrl, ports });
+      await client.refreshManifest();
+
+      await client.ensureModelReady();
+
+      expect(llmRuntime.loadModelCalls).toHaveLength(1);
+      expect(llmRuntime.loadModelCalls[0]!.batchSize).toBeUndefined();
+      expect(llmRuntime.loadModelCalls[0]!.ubatchSize).toBeUndefined();
+    });
+
+    it('forwards the new runtimeTuning.batchSize/ubatchSize to loadModel() again on switchModel() (independent reload call site)', async () => {
+      const client = await LocalAiClient.create({ manifestUrl, ports, runtimeTuning: { batchSize: 512, ubatchSize: 256 } });
+      await client.refreshManifest();
+      await client.ensureModelReady();
+
+      await client.switchModel();
+
+      expect(llmRuntime.loadModelCalls).toHaveLength(2);
+      expect(llmRuntime.loadModelCalls[1]!.batchSize).toBe(512);
+      expect(llmRuntime.loadModelCalls[1]!.ubatchSize).toBe(256);
+    });
+  });
+
   // getDownloadProgress() — added 2026-08-19 so a consumer can show "resume
   // from X%" before the user taps download, rather than only finding out
   // once ensureModelReady() is already moving (docs/decisions.md's

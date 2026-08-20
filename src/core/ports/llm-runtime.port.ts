@@ -17,14 +17,20 @@ import type { CompletionInput, CompletionOptions, CompletionStream, CompletionRe
  */
 export interface LlmRuntimePort {
   /**
-   * `threads` is optional and additive — `undefined` means "don't pass
-   * anything, let the native runtime keep its own default", exactly like
-   * every other tuning knob on this port. See
-   * `docs/plans/llama2/2026-08-20-local-ai-perf-tuning-plan.md` §3 for why
-   * this exists (CPU-only Android perf tuning, TZ-adjacent but not a TZ
-   * phase).
+   * `threads`/`batchSize`/`ubatchSize` are optional and additive —
+   * `undefined` means "don't pass anything, let the native runtime keep its
+   * own default", exactly like every other tuning knob on this port. See
+   * `docs/plans/llama2/2026-08-20-local-ai-perf-tuning-plan.md` §3
+   * (`threads`) and §5 (`batchSize`/`ubatchSize`) for why these exist
+   * (CPU-only Android perf tuning, TZ-adjacent but not a TZ phase).
    */
-  loadModel(options: { modelPath: string; contextLength: number; threads?: number }): Promise<void>;
+  loadModel(options: {
+    modelPath: string;
+    contextLength: number;
+    threads?: number;
+    batchSize?: number;
+    ubatchSize?: number;
+  }): Promise<void>;
   loadEmbeddingModel(options: { modelPath: string }): Promise<void>;
 
   /** Releases the LLM context only — leaves the embedding context (if loaded) untouched. TZ §5.5. */

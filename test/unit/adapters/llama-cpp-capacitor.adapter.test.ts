@@ -55,6 +55,38 @@ describe('LlamaCppCapacitorAdapter.loadModel() — n_threads plumbing (perf-tuni
   });
 });
 
+describe('LlamaCppCapacitorAdapter.loadModel() — n_batch/n_ubatch plumbing (perf-tuning plan §5)', () => {
+  it('passes n_batch/n_ubatch through to initLlama() when loadModel() is given batchSize/ubatchSize', async () => {
+    const adapter = new LlamaCppCapacitorAdapter();
+    await adapter.loadModel({ modelPath: '/abs/model.gguf', contextLength: 4096, batchSize: 256, ubatchSize: 128 });
+
+    expect(initLlama).toHaveBeenCalledTimes(1);
+    const params = vi.mocked(initLlama).mock.calls[0]![0] as { n_batch?: number; n_ubatch?: number };
+    expect(params.n_batch).toBe(256);
+    expect(params.n_ubatch).toBe(128);
+  });
+
+  it('omits n_batch/n_ubatch entirely (not just undefined) when loadModel() is not given batchSize/ubatchSize, preserving the native default', async () => {
+    const adapter = new LlamaCppCapacitorAdapter();
+    await adapter.loadModel({ modelPath: '/abs/model.gguf', contextLength: 4096 });
+
+    expect(initLlama).toHaveBeenCalledTimes(1);
+    const params = vi.mocked(initLlama).mock.calls[0]![0];
+    expect('n_batch' in params).toBe(false);
+    expect('n_ubatch' in params).toBe(false);
+  });
+
+  it('passes n_batch without n_ubatch when only batchSize is given (each field is independently optional)', async () => {
+    const adapter = new LlamaCppCapacitorAdapter();
+    await adapter.loadModel({ modelPath: '/abs/model.gguf', contextLength: 4096, batchSize: 256 });
+
+    expect(initLlama).toHaveBeenCalledTimes(1);
+    const params = vi.mocked(initLlama).mock.calls[0]![0] as { n_batch?: number };
+    expect(params.n_batch).toBe(256);
+    expect('n_ubatch' in params).toBe(false);
+  });
+});
+
 describe('LlamaCppCapacitorAdapter.complete() — native-jinja failure fallback', () => {
   it('calls completion() with messages + jinja: true when not skipNativeTemplating, and returns its result on success', async () => {
     mockCompletion.mockResolvedValue({ content: 'hi there', interrupted: false, tokens_predicted: 3 });

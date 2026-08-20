@@ -77,11 +77,14 @@ export interface LocalAiConfig {
    * CPU-only native-runtime tuning knobs — all optional, all additive
    * (`undefined` = native default, unchanged behavior for any consumer that
    * doesn't set them). See
-   * `docs/plans/llama2/2026-08-20-local-ai-perf-tuning-plan.md` §3 (`n_threads`
-   * is currently the only field; `batchSize`/`ubatchSize`/`flashAttention`/
-   * `kvCacheQuant` are later phases of the same plan, not yet wired here).
+   * `docs/plans/llama2/2026-08-20-local-ai-perf-tuning-plan.md` §3
+   * (`threads`) and §5 (`batchSize`/`ubatchSize` — plumbed here but
+   * deliberately left unset by `forta.chat` until there's a device measurement
+   * pointing at `n_batch` specifically, see the plan's own reasoning);
+   * `flashAttention`/`kvCacheQuant` are a later phase of the same plan, not
+   * yet wired here.
    */
-  runtimeTuning?: { threads?: number };
+  runtimeTuning?: { threads?: number; batchSize?: number; ubatchSize?: number };
   ports?: Partial<LocalAiPorts>;
   /**
    * Pluggable callback — called for every internal log event regardless of
@@ -559,6 +562,8 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
         modelPath: absoluteModelPath,
         contextLength: artifact.contextLength,
         threads: this.config.runtimeTuning?.threads,
+        batchSize: this.config.runtimeTuning?.batchSize,
+        ubatchSize: this.config.runtimeTuning?.ubatchSize,
       });
       this.modelLoaded = true;
       // Registers this as "current" even on a completely fresh install (no
@@ -666,6 +671,8 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
       modelPath: absoluteModelPath,
       contextLength: artifact.contextLength,
       threads: this.config.runtimeTuning?.threads,
+      batchSize: this.config.runtimeTuning?.batchSize,
+      ubatchSize: this.config.runtimeTuning?.ubatchSize,
     });
     this.modelLoaded = true;
     await this.emit('runtime:model-loaded', { modelId: artifact.id, version: artifact.version });
