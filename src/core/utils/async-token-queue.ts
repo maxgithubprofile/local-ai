@@ -1,7 +1,7 @@
 /**
  * Bridges a callback-driven token producer (both `node-llama-cpp`'s
- * `onTextChunk` and `llama-cpp-capacitor`'s `completion(params, callback)`
- * push tokens via a callback, not an `AsyncIterable`) into the
+ * `onTextChunk` and `llama-cpp-pro`'s (formerly `llama-cpp-capacitor`)
+ * `completion(params, callback)` push tokens via a callback, not an `AsyncIterable`) into the
  * `AsyncIterable<CompletionToken>` half of `CompletionStream` (TZ §10.0).
  * Shared between the Node and Capacitor LLM runtime adapters *and*
  * `LocalAiClient.sendMessage()` — pure logic, no platform dependency, so it

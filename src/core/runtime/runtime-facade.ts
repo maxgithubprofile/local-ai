@@ -2,6 +2,7 @@ import type { LlmRuntimePort } from '../ports/llm-runtime.port.js';
 import type { CompletionInput, CompletionResult, CompletionStream } from '../types.js';
 import { RuntimeBusyError } from '../errors.js';
 import { formatChatPrompt, type ChatTemplatePreset } from './chat-template-presets.js';
+import { DEFAULT_COMPLETION_MAX_TOKENS } from '../conversations/context-window-policy.js';
 
 async function* emptyAsyncIterable<T>(): AsyncIterable<T> {
   // Intentionally yields nothing — used when generation never starts.
@@ -43,7 +44,25 @@ export class RuntimeFacade {
       };
     }
 
-    const [effectiveInput, skipNativeTemplating] = this.resolveTemplating(input, model.chatTemplate);
+    // Always resolve a concrete maxTokens here — never let an adapter see
+    // `undefined` and fall back to its own native library's default. Live
+    // bug, 2026-08-19: `llama-cpp-capacitor@0.1.5`'s Android JNI layer
+    // silently substitutes a hardcoded `n_predict = 50` whenever the JS side
+    // omits it, instead of the plugin's own documented "-1 (infinite)"
+    // default — more than enough for a reasoning model to burn its entire
+    // budget on `<think>` content and get cut off before ever answering.
+    // Not reverified against `llama-cpp-pro@0.2.4` (needs a device, see
+    // `docs/adr/0008-llama-cpp-pro-migration.md` §7) — keep this choke point
+    // regardless of whether that specific bug is fixed upstream: it protects
+    // every `LlmRuntimePort` adapter from any plugin's undocumented default,
+    // not just this one. Applying `DEFAULT_COMPLETION_MAX_TOKENS` here (the
+    // same constant `defaultMaxContextTokens()` already assumes when
+    // reserving context-window headroom, TZ §9.7) is that single choke point.
+    const boundedInput: CompletionInput = {
+      ...input,
+      options: { ...input.options, maxTokens: input.options?.maxTokens ?? DEFAULT_COMPLETION_MAX_TOKENS },
+    };
+    const [effectiveInput, skipNativeTemplating] = this.resolveTemplating(boundedInput, model.chatTemplate);
 
     this.busy = true;
     const stream = this.runtime.complete(effectiveInput, signal, { skipNativeTemplating });

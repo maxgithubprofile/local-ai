@@ -51,7 +51,7 @@
     "@capacitor/filesystem": ">=8.0.0",
     "@capgo/capacitor-device-info": ">=8.0.0",
     "@capgo/capacitor-downloader": ">=8.0.0",
-    "llama-cpp-capacitor": ">=0.1.5"
+    "llama-cpp-pro": ">=0.2.4"
   },
   "peerDependenciesMeta": {
     "@capacitor-community/sqlite": {
@@ -72,7 +72,7 @@
     "@capgo/capacitor-downloader": {
       "optional": true
     },
-    "llama-cpp-capacitor": {
+    "llama-cpp-pro": {
       "optional": true
     }
   },
@@ -97,7 +97,7 @@
     "cross-env": "^10.1.0",
     "eslint": "^9.9.0",
     "eslint-plugin-jsdoc": "^48.11.0",
-    "llama-cpp-capacitor": "^0.1.5",
+    "llama-cpp-pro": "^0.2.4",
     "node-llama-cpp": "^3.19.1",
     "sqlite-vec": "^0.1.9",
     "tsup": "^8.2.0",

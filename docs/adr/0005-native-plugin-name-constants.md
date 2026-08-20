@@ -13,7 +13,7 @@ plugins in this project by reading each package's native source directly, not it
 
 | Capability | Plugin package | Registration name | Android source | iOS source |
 |---|---|---|---|---|
-| `inference` | `llama-cpp-capacitor@0.1.5` | `'LlamaCpp'` | `LlamaCppPlugin.java:20` | `LlamaCppPlugin.swift` (`CAPBridgedPlugin`) |
+| `inference` | `llama-cpp-pro@0.2.4` (formerly `llama-cpp-capacitor@0.1.5`, same package renamed — ADR 0008) | `'LlamaCpp'` | `LlamaCppPlugin.java:20` | `LlamaCppPlugin.swift` (`CAPBridgedPlugin`) |
 | `sql`/`vectorSearch` | `@capacitor-community/sqlite@8.1.1` | `'CapacitorSQLite'` | `CapacitorSQLitePlugin.java:22` | `CapacitorSQLitePlugin.swift:9` (`jsName`) |
 | `download` | `@capgo/capacitor-downloader@8.1.31` | `'CapacitorDownloader'` | `CapacitorDownloaderPlugin.java:23` | `CapacitorDownloaderPlugin.swift:13` (`jsName`) |
 | `deviceInfo` | `@capgo/capacitor-device-info@8.0.10` | `'DeviceInfo'` | `DeviceInfoPlugin.java:14` | `DeviceInfoPlugin.swift:11` (`jsName`) |
@@ -27,7 +27,7 @@ Web-support matrix, from the presence/absence of each package's `src/web.ts`:
 
 | Plugin | Ships `src/web.ts`? |
 |---|---|
-| `llama-cpp-capacitor` | No |
+| `llama-cpp-pro` (formerly `llama-cpp-capacitor`) | No |
 | `@capacitor-community/sqlite` | Yes (via `jeep-sqlite`) |
 | `@capgo/capacitor-downloader` | No |
 | `@capgo/capacitor-device-info` | No |

@@ -29,6 +29,19 @@ export interface CompletionResult {
   content: string;
   status: 'complete' | 'cancelled' | 'error';
   tokenCount?: number;
+  /**
+   * The underlying exception's message when `status: 'error'` — TZ §9.8's
+   * "mid-generation failures resolve, never reject" contract means the
+   * actual native error would otherwise be discarded entirely, leaving
+   * both the UI and logs with no way to tell *why* generation failed.
+   * `LocalAiClient.sendMessage()` copies this into the persisted
+   * `ChatMessage.metadata.errorMessage` (2026-08-19 live bug: a real
+   * failure surfaced only as an opaque "не удалось сгенерировать ответ",
+   * with zero diagnostic trail in logcat or here).
+   */
+  errorMessage?: string;
+  /** Chain-of-thought extracted from a `<think>...</think>` block, if the model produced one — see `splitReasoningContent()`'s doc comment. `content` never contains the raw tags. */
+  reasoningContent?: string;
 }
 
 /** One streamed token as seen by a `for await` subscriber — TZ §10.0. */

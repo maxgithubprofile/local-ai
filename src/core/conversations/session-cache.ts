@@ -92,7 +92,12 @@ export class SessionCache {
       return { loadedFromCache: false };
     }
     try {
-      await this.llmRuntime.loadSession(path);
+      // loadSession() hands the path straight to the native runtime, which
+      // has no concept of this port's relative+directory convention — see
+      // FileSystemPort.toAbsolutePath()'s doc comment. `path` itself stays
+      // relative for the fileSystem.*() calls above/below, which do
+      // understand that convention.
+      await this.llmRuntime.loadSession(await this.fileSystem.toAbsolutePath(path));
       await this.touch(chatId, modelFingerprint);
       return { loadedFromCache: true };
     } catch {
@@ -104,7 +109,8 @@ export class SessionCache {
 
   /** Persists the current runtime KV state as `chatId`'s session file — call after a completed generation (TZ §9.3 step 4). Counts as a touch; may evict a different, older slot if this pushes the cache past `maxSlots`. */
   async save(chatId: string, modelFingerprint: string): Promise<void> {
-    await this.llmRuntime.saveSession(this.sessionPath(chatId, modelFingerprint));
+    const path = this.sessionPath(chatId, modelFingerprint);
+    await this.llmRuntime.saveSession(await this.fileSystem.toAbsolutePath(path));
     await this.touch(chatId, modelFingerprint);
   }
 

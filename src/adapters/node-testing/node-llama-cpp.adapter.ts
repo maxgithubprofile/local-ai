@@ -4,6 +4,7 @@ import type { LlmRuntimePort } from '../../core/ports/llm-runtime.port.js';
 import type { CompletionInput, CompletionResult, CompletionStream, CompletionToken } from '../../core/types.js';
 import { RuntimeInitError } from '../../core/errors.js';
 import { AsyncTokenQueue } from '../../core/utils/async-token-queue.js';
+import { splitReasoningContent } from '../../core/runtime/reasoning-content.js';
 
 type ChatHistoryItem =
   | { type: 'system'; text: string }
@@ -115,7 +116,8 @@ export class NodeLlamaCppAdapter implements LlmRuntimePort {
               customStopTriggers: input.options?.stop,
               onTextChunk,
             });
-            return { content: response.response, status: signal?.aborted ? 'cancelled' : 'complete' };
+            const split = splitReasoningContent(response.response);
+            return { content: split.content, status: signal?.aborted ? 'cancelled' : 'complete', reasoningContent: split.reasoningContent ?? undefined };
           } finally {
             await completion.dispose();
           }
@@ -132,11 +134,12 @@ export class NodeLlamaCppAdapter implements LlmRuntimePort {
           customStopTriggers: input.options?.stop,
           onTextChunk,
         });
-        return { content: response.response, status: signal?.aborted ? 'cancelled' : 'complete' };
-      } catch {
+        const split = splitReasoningContent(response.response);
+        return { content: split.content, status: signal?.aborted ? 'cancelled' : 'complete', reasoningContent: split.reasoningContent ?? undefined };
+      } catch (err) {
         // TZ §9.8: mid-generation failures *resolve* with status: 'error', never reject.
         if (signal?.aborted) return { content: accumulated, status: 'cancelled' };
-        return { content: accumulated, status: 'error' };
+        return { content: accumulated, status: 'error', errorMessage: err instanceof Error ? err.message : String(err) };
       } finally {
         queue.close();
       }

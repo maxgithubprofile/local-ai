@@ -40,6 +40,17 @@ export class CapacitorFsAdapter implements FileSystemPort {
     return segments.join('/');
   }
 
+  /**
+   * `Filesystem.getUri()` is the plugin's own documented mechanism for
+   * turning a `{path, directory}` pair into a real filesystem URI — used
+   * wherever a path needs to leave this port's own relative+directory
+   * convention (see `FileSystemPort.toAbsolutePath()`'s doc comment).
+   */
+  async toAbsolutePath(path: string): Promise<string> {
+    const { uri } = await Filesystem.getUri({ path, directory: this.directory });
+    return uri.startsWith('file://') ? uri.slice('file://'.length) : uri;
+  }
+
   async exists(path: string): Promise<boolean> {
     try {
       await Filesystem.stat({ path, directory: this.directory });

@@ -55,4 +55,5 @@ export type {
   HashPort,
   IncrementalHasher,
   AppLifecyclePort,
+  FastVerifyPort,
 } from './ports/index.js';

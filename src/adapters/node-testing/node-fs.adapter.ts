@@ -19,6 +19,10 @@ export class NodeFsAdapter implements FileSystemPort {
     return path.join(this.root, ...segments);
   }
 
+  async toAbsolutePath(filePath: string): Promise<string> {
+    return path.resolve(filePath); // resolvePath() already returns an absolute path for this adapter
+  }
+
   async exists(filePath: string): Promise<boolean> {
     try {
       await fs.access(filePath);

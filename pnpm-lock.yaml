@@ -54,9 +54,9 @@ importers:
       eslint-plugin-jsdoc:
         specifier: ^48.11.0
         version: 48.11.0(eslint@9.39.5)
-      llama-cpp-capacitor:
-        specifier: ^0.1.5
-        version: 0.1.5(@capacitor/core@8.5.0)
+      llama-cpp-pro:
+        specifier: ^0.2.4
+        version: 0.2.4(@capacitor/core@8.5.0)
       node-llama-cpp:
         specifier: ^3.19.1
         version: 3.19.1(typescript@5.9.3)
@@ -1517,10 +1517,10 @@ packages:
   linkify-it@5.0.2:
     resolution: {integrity: sha512-ONTm2jCMAVZjgQa/Fy1kScXsuOoF5NPTsoFBdE1KVIZ2vAh/r9+Bqo+0jINCBYnavTPQZz38QzFTme79ENoN3Q==}
 
-  llama-cpp-capacitor@0.1.5:
-    resolution: {integrity: sha512-81u2ydsd4nO70jrv4XnxgqiPekm4IJD4xX5gVlTKwROpfV8NyQBpBs+7ywG4i0eKQmGuvCkFepaixheJ6FeOgQ==}
+  llama-cpp-pro@0.2.4:
+    resolution: {integrity: sha512-CPGajTlgjE3OZ5szRppdl9GyjcBOriy0EV/M+nXQWu9v1txXrjgNs18qZ+D/rb2UhM2J/vz75N8kT/3fyX/cFw==}
     peerDependencies:
-      '@capacitor/core': '>=8.0.0'
+      '@capacitor/core': '>=6.0.0'
 
   load-tsconfig@0.2.5:
     resolution: {integrity: sha512-IXO6OCs9yg8tMKzfPZ1YmheJbZCiEsnBdcB03l0OcfK9prKnJb96siuHCr5Fl37/yo9DnKU+TLpxzTUspw9shg==}
@@ -3460,7 +3460,7 @@ snapshots:
     dependencies:
       uc.micro: 2.1.0
 
-  llama-cpp-capacitor@0.1.5(@capacitor/core@8.5.0):
+  llama-cpp-pro@0.2.4(@capacitor/core@8.5.0):
     dependencies:
       '@capacitor/core': 8.5.0
 

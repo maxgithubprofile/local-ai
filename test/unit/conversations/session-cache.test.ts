@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import { SessionCache } from '../../../src/core/conversations/session-cache.js';
 import { FakeLlmRuntimeAdapter } from '../../../src/adapters/node-testing/fake-llm-runtime.adapter.js';
 import { NodeFsAdapter } from '../../../src/adapters/node-testing/node-fs.adapter.js';
+import type { FileSystemPort } from '../../../src/core/ports/filesystem.port.js';
 
 describe('SessionCache', () => {
   let tmpDir: string;
@@ -118,6 +119,56 @@ describe('SessionCache', () => {
     expect(await fileSystem.exists(fileSystem.resolvePath('sessions', 'session-chat-1-model-v1.bin'))).toBe(true);
     expect(await fileSystem.exists(fileSystem.resolvePath('sessions', 'session-chat-2-model-v1.bin'))).toBe(false);
     expect(await fileSystem.exists(fileSystem.resolvePath('sessions', 'session-chat-3-model-v1.bin'))).toBe(true);
+  });
+
+  // Regression for the 2026-08-19 live bug: loadSession()/saveSession() were
+  // being handed the port's own relative+directory-convention path
+  // directly — fine for fileSystem.exists()/deleteFile() (same port, same
+  // convention) but meaningless to the native runtime behind
+  // LlmRuntimePort, which has no concept of it. This wraps toAbsolutePath()
+  // to return an observably different (but still valid, on-disk) path, and
+  // asserts SessionCache forwards *that* to the runtime while still using
+  // the original path for its own fileSystem.*() calls.
+  it('activate()/save() pass loadSession()/saveSession() the fileSystem.toAbsolutePath()-resolved path, not the raw one', async () => {
+    const rawPathsSeen: string[] = [];
+    const wrappedFs: FileSystemPort = {
+      exists: (p) => fileSystem.exists(p),
+      mkdir: (p, o) => fileSystem.mkdir(p, o),
+      writeFile: (p, d) => fileSystem.writeFile(p, d),
+      appendFile: (p, d) => fileSystem.appendFile(p, d),
+      readFile: (p) => fileSystem.readFile(p),
+      readChunks: (p, c) => fileSystem.readChunks(p, c),
+      deleteFile: (p) => fileSystem.deleteFile(p),
+      listFiles: (p) => fileSystem.listFiles(p),
+      stat: (p) => fileSystem.stat(p),
+      resolvePath: (...s) => fileSystem.resolvePath(...s),
+      freeSpaceBytes: (p) => fileSystem.freeSpaceBytes(p),
+      toAbsolutePath: async (p) => {
+        rawPathsSeen.push(p);
+        const real = await fileSystem.toAbsolutePath(p);
+        return path.join(path.dirname(real), 'resolved-marker', path.basename(real));
+      },
+    };
+    const wrapped = new SessionCache(runtime, wrappedFs);
+    const expectedRelative = fileSystem.resolvePath('sessions', 'session-chat-1-model-v1.bin');
+
+    await wrapped.save('chat-1', 'model-v1');
+    expect(rawPathsSeen).toContain(expectedRelative); // toAbsolutePath() itself got the plain (pre-resolution) path
+    expect(runtime.savedSessionPaths).toHaveLength(1);
+    expect(runtime.savedSessionPaths[0]).toContain('resolved-marker');
+    expect(runtime.savedSessionPaths[0]).not.toBe(expectedRelative);
+
+    // Write the session file directly at the real (untransformed) location
+    // — exists()/deleteFile() must keep using that convention, independent
+    // of toAbsolutePath()'s output — so activate() finds it and proceeds to
+    // loadSession().
+    await fileSystem.writeFile(expectedRelative, 'fake-session-marker');
+    const fresh = new SessionCache(runtime, wrappedFs);
+    const result = await fresh.activate('chat-1', 'model-v1');
+
+    expect(result.loadedFromCache).toBe(true);
+    expect(runtime.loadedSessionPaths).toHaveLength(1);
+    expect(runtime.loadedSessionPaths[0]).toContain('resolved-marker');
   });
 
   it('deleteForChat() removes only that chat\'s session file(s)', async () => {

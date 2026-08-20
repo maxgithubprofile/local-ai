@@ -21,13 +21,26 @@ export interface DownloadState {
   updatedAt: string;
 }
 
-/** Public download progress event — TZ §7.5. */
+/** Public download progress event — TZ §7.5.
+ *
+ * `status: 'loading'` is NOT one of `DownloadState`'s persisted statuses —
+ * deliberately: it means "downloaded, verified, and now being loaded into
+ * the native LLM runtime" (`LocalAiClient.ensureModelReady()`'s
+ * `llmRuntime.loadModel()` step), a phase `DownloadEngine`/the SQL
+ * `download_state` row have already finished with (`status: 'completed'`)
+ * by the time it happens — it's `LocalAiClient`'s own transient, in-memory
+ * signal, not a download state. Reuses this same event/callback rather than
+ * a separate one so a consumer doesn't need a second subscription just to
+ * know the difference between "still verifying" and "verified, now loading
+ * into memory" — both can otherwise look identical ("100%, nothing visibly
+ * happening") to a user watching a progress bar, which is exactly what was
+ * reported live (2026-08-19: "скачалась модель - зависла на 100%"). */
 export interface DownloadProgress {
   key: string;
   kind: 'model' | 'embedding';
   percent: number;
   approximateBytes?: number;
-  status: DownloadState['status'];
+  status: DownloadState['status'] | 'loading';
 }
 
 /**

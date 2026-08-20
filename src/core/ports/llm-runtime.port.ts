@@ -2,7 +2,8 @@ import type { CompletionInput, CompletionOptions, CompletionStream, CompletionRe
 
 /**
  * Port over the native inference runtime — TZ §4.1. The production adapter
- * wraps `llama-cpp-capacitor` (`initLlama`/`completion`/`embedding`/
+ * wraps `llama-cpp-pro` (formerly `llama-cpp-capacitor`, see
+ * `docs/adr/0008-llama-cpp-pro-migration.md`) (`initLlama`/`completion`/`embedding`/
  * `release`/`saveSession`/`loadSession`); the Node adapter wraps
  * `node-llama-cpp` for tests and dev-time use (TZ §13.1). Deliberately has
  * **no LoRA-specific fields** — swapping the native plugin later must not

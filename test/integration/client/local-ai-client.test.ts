@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { LocalAiClient } from '../../../src/core/client/local-ai-client.js';
 import type { LocalAiPorts } from '../../../src/core/ports/index.js';
+import type { FileSystemPort } from '../../../src/core/ports/filesystem.port.js';
 import { FakePlatformSupportAdapter } from '../../../src/adapters/node-testing/fake-platform-support.adapter.js';
 import { FakeDeviceInfoAdapter } from '../../../src/adapters/node-testing/fake-device-info.adapter.js';
 import { FakeLlmRuntimeAdapter } from '../../../src/adapters/node-testing/fake-llm-runtime.adapter.js';
@@ -186,6 +187,90 @@ describe('LocalAiClient', () => {
 
     const embedding = await client.embed('some text');
     expect(embedding).toBeInstanceOf(Float32Array);
+  });
+
+  // Regression: once the download+verify pipeline finished (status:
+  // 'completed'), ensureModelReady() went silent for the entire
+  // llmRuntime.loadModel() call — no distinct signal that a real,
+  // separate (and non-trivial, for a GB-scale GGUF) phase was in
+  // progress. A UI watching only 'completed'/percent could not tell
+  // "verified, about to load" apart from "still stuck at 100%"
+  // (reported live 2026-08-19: "скачалась модель - зависла на 100%").
+  it("ensureModelReady() emits a status: 'loading' progress event before calling llmRuntime.loadModel()", async () => {
+    const client = await LocalAiClient.create({ manifestUrl, ports });
+    await client.refreshManifest();
+    const statuses: string[] = [];
+    let modelLoadedWhenLoadingEventFired: boolean | undefined;
+
+    await client.ensureModelReady({
+      onProgress: (p) => {
+        statuses.push(p.status);
+        if (p.status === 'loading') modelLoadedWhenLoadingEventFired = llmRuntime.modelLoaded;
+      },
+    });
+
+    expect(statuses).toContain('loading');
+    expect(statuses.indexOf('completed')).toBeLessThan(statuses.lastIndexOf('loading')); // download+verify pipeline was already done
+    expect(modelLoadedWhenLoadingEventFired).toBe(false); // fired BEFORE loadModel() actually ran, not after
+    expect(llmRuntime.modelLoaded).toBe(true); // and loadModel() did still run
+  });
+
+  it("ensureModelReady() does NOT emit 'loading' again on a no-op call once the model is already loaded", async () => {
+    const client = await LocalAiClient.create({ manifestUrl, ports });
+    await client.refreshManifest();
+    await client.ensureModelReady();
+
+    const statuses: string[] = [];
+    await client.ensureModelReady({ onProgress: (p) => statuses.push(p.status) });
+
+    expect(statuses).not.toContain('loading');
+  });
+
+  // Regression for the 2026-08-19 live bug: loadModel()/loadEmbeddingModel()
+  // were being handed FileSystemPort.resolvePath()'s output directly — a
+  // path relative to the port's own Directory.Data convention, which the
+  // native llama.cpp binding behind LlmRuntimePort has no way to resolve.
+  // NodeFsAdapter's toAbsolutePath() is a same-value no-op (see its own
+  // test), so this wraps it to prove LocalAiClient actually calls
+  // toAbsolutePath() and forwards *its* result, rather than the raw
+  // destinationPath, to the runtime.
+  it('ensureModelReady()/ensureEmbeddingReady() pass loadModel()/loadEmbeddingModel() the fileSystem.toAbsolutePath()-resolved path, not the raw relative one', async () => {
+    const rawPathsSeen: string[] = [];
+    const realFs = ports.fileSystem;
+    // Explicit method-by-method delegation, not `{ ...realFs }` — a class
+    // instance's methods live on its prototype, not as own-enumerable
+    // properties, so a plain object spread would silently drop all of them.
+    const wrappedFs: FileSystemPort = {
+      exists: (p) => realFs.exists(p),
+      mkdir: (p, o) => realFs.mkdir(p, o),
+      writeFile: (p, d) => realFs.writeFile(p, d),
+      appendFile: (p, d) => realFs.appendFile(p, d),
+      readFile: (p) => realFs.readFile(p),
+      readChunks: (p, c) => realFs.readChunks(p, c),
+      deleteFile: (p) => realFs.deleteFile(p),
+      listFiles: (p) => realFs.listFiles(p),
+      stat: (p) => realFs.stat(p),
+      resolvePath: (...s) => realFs.resolvePath(...s),
+      freeSpaceBytes: (p) => realFs.freeSpaceBytes(p),
+      toAbsolutePath: async (p) => {
+        rawPathsSeen.push(p);
+        const real = await realFs.toAbsolutePath(p);
+        return `RESOLVED::${real}`;
+      },
+    };
+    const client = await LocalAiClient.create({ manifestUrl, ports: { ...ports, fileSystem: wrappedFs } });
+    await client.refreshManifest();
+
+    await client.ensureModelReady();
+    await client.ensureEmbeddingReady();
+
+    expect(llmRuntime.loadModelCalls).toHaveLength(1);
+    expect(llmRuntime.loadModelCalls[0]!.modelPath).toMatch(/^RESOLVED::/);
+    expect(llmRuntime.loadEmbeddingModelCalls).toHaveLength(1);
+    expect(llmRuntime.loadEmbeddingModelCalls[0]!.modelPath).toMatch(/^RESOLVED::/);
+    // and toAbsolutePath() itself was handed exactly resolvePath()'s own output — not a re-derived path
+    expect(rawPathsSeen).toContain(ports.fileSystem.resolvePath('models', 'model.gguf'));
+    expect(rawPathsSeen).toContain(ports.fileSystem.resolvePath('embeddings', 'embedding.gguf'));
   });
 
   // getDownloadProgress() — added 2026-08-19 so a consumer can show "resume

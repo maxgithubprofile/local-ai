@@ -13,8 +13,28 @@ describe('RuntimeFacade', () => {
     await stream.result;
 
     expect(runtime.completeCalls).toHaveLength(1);
-    expect(runtime.completeCalls[0]?.input).toBe(input);
+    // Not the same object reference any more — complete() always resolves a
+    // concrete maxTokens (see below), which means cloning `input.options`.
+    expect(runtime.completeCalls[0]?.input.messages).toEqual(input.messages);
     expect(runtime.completeCalls[0]?.options?.skipNativeTemplating).toBeFalsy();
+  });
+
+  it('defaults maxTokens to DEFAULT_COMPLETION_MAX_TOKENS when the caller omits it, for every adapter regardless of its own native default', async () => {
+    const runtime = new FakeLlmRuntimeAdapter();
+    const facade = new RuntimeFacade(runtime);
+
+    await facade.complete({ messages: [{ role: 'user', content: 'hi' }] }, { chatTemplate: 'auto' }).result;
+
+    expect(runtime.completeCalls[0]?.input.options?.maxTokens).toBe(512);
+  });
+
+  it('leaves an explicit maxTokens untouched', async () => {
+    const runtime = new FakeLlmRuntimeAdapter();
+    const facade = new RuntimeFacade(runtime);
+
+    await facade.complete({ messages: [{ role: 'user', content: 'hi' }], options: { maxTokens: 30 } }, { chatTemplate: 'auto' }).result;
+
+    expect(runtime.completeCalls[0]?.input.options?.maxTokens).toBe(30);
   });
 
   it("mechanism 2 (explicit preset): formats messages into one string, skipNativeTemplating true", async () => {

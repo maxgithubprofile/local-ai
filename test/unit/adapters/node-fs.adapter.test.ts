@@ -22,6 +22,11 @@ describe('NodeFsAdapter', () => {
     expect(adapter.resolvePath('models', 'a.gguf')).toBe(path.join(tmpDir, 'models', 'a.gguf'));
   });
 
+  it('toAbsolutePath() is a no-op — resolvePath() already returns an absolute path for this adapter', async () => {
+    const p = adapter.resolvePath('models', 'a.gguf');
+    expect(await adapter.toAbsolutePath(p)).toBe(p);
+  });
+
   it('exists() is false for a missing file and true after writeFile()', async () => {
     const p = adapter.resolvePath('a.txt');
     expect(await adapter.exists(p)).toBe(false);

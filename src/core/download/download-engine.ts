@@ -3,6 +3,7 @@ import type { FileSystemPort } from '../ports/filesystem.port.js';
 import type { HashPort } from '../ports/hash.port.js';
 import type { SqlitePort } from '../ports/sqlite.port.js';
 import type { ClockPort } from '../ports/clock.port.js';
+import type { FastVerifyPort } from '../ports/fast-verify.port.js';
 import { ChecksumMismatchError, DownloadError, InsufficientStorageError } from '../errors.js';
 import { verifyChecksum } from './checksum.js';
 import type { DownloadProgress, DownloadState } from './download-state.js';
@@ -22,6 +23,10 @@ export interface DownloadEngineOptions {
   maxAttempts?: number;
   /** Delay before attempt `n` (0-indexed) retries. Default exponential, capped at 30s. */
   backoffMs?: (attempt: number) => number;
+  /** Optional native-speed checksum — see `FastVerifyPort`'s own doc
+   *  comment. Falls back to `checksum.ts`'s portable `readChunks()`+
+   *  `HashPort` streaming path when omitted. */
+  fastVerify?: FastVerifyPort;
 }
 
 function defaultBackoff(attempt: number): number {
@@ -87,6 +92,21 @@ export class DownloadEngine {
         attempt: 0,
         updatedAt: this.clock.nowIso(),
       };
+    } else if (state.status === 'failed') {
+      // A previous downloadArtifact() call already burned through every
+      // attempt in its own maxAttempts budget and gave up — state.attempt
+      // sits at maxAttempts, so without this the loop below wouldn't run
+      // even once (`attempt < maxAttempts` false from the start) and this
+      // call would fail immediately without trying at all. This call is a
+      // fresh, separate, explicit invocation (a caller retrying after a
+      // transient failure — e.g. the user tapping "resume" after their
+      // connection dropped) — it gets its own full attempt budget. The
+      // bytes already on disk (if the transport supports real resume)
+      // aren't touched by this — only the SQL-persisted attempt counter
+      // resets, so a resume-capable transport still resumes from where it
+      // left off, this just stops it from being an instant no-op.
+      state.attempt = 0;
+      state.status = 'pending';
     }
 
     const maxAttempts = this.options.maxAttempts ?? 5;
@@ -114,17 +134,51 @@ export class DownloadEngine {
       state.status = 'downloading';
       await this.saveState(state);
 
-      const result = await this.runOneAttempt(key, artifact, destinationPath, callbacks);
+      // The file can already have every expected byte without the
+      // persisted state saying status: 'completed' — the SQL row and the
+      // real transport can fall out of sync whenever the process restarts
+      // mid-flight (the app relaunches, gets killed/updated, ...) after a
+      // resume-capable transport's own OS-level component (e.g. a Kotlin
+      // foreground service) finished writing but before this JS-side loop
+      // ever processed that completion — confirmed happening live,
+      // 2026-08-19. Skip straight to verification in that case: issuing a
+      // Range request for zero remaining bytes is asking the server for
+      // nothing, which it correctly rejects (416/similar) — a real
+      // failure for a download that, bytes-wise, already succeeded.
+      // Falls through to the normal attempt path (and, via checksum
+      // verification's own mismatch handling, self-corrects) if the file
+      // is merely *oversized* rather than genuinely complete — this is
+      // strictly `>=`, not `===`.
+      const existingStat = await this.fileSystem.stat(destinationPath);
+      const alreadyHasAllBytes = !!existingStat && existingStat.sizeBytes >= artifact.sizeBytes;
+      const result = alreadyHasAllBytes ? { ok: true as const } : await this.runOneAttempt(key, artifact, destinationPath, callbacks);
 
       if (result.ok) {
         state.status = 'verifying';
         await this.saveState(state);
-        callbacks?.onProgress?.({ key, kind: artifact.kind, percent: 100, status: 'verifying' });
+        callbacks?.onProgress?.({ key, kind: artifact.kind, percent: 0, status: 'verifying' });
 
-        const valid = await verifyChecksum(destinationPath, artifact.sha256, {
-          fileSystem: this.fileSystem,
-          hash: this.hash,
-        });
+        // Streamed with real per-chunk progress, not a single 0%-then-silent
+        // call — hashing a GB-scale GGUF through the Capacitor Filesystem
+        // bridge (readChunks() → repeated readFile() round-trips, each with
+        // its own base64 encode/decode) is genuinely slow, not instant the
+        // way it might be for a small file. Without this, the UI had
+        // nothing to show between "download reached 100%" and "verification
+        // finished" — which could be the better part of a minute for a
+        // multi-gigabyte model — and read as a hang (reported live,
+        // 2026-08-19: "скачалась модель - зависла на 100%").
+        const onVerifyProgress = (bytesHashed: number): void => {
+          const percent = Math.min(100, Math.round((bytesHashed / artifact.sizeBytes) * 100));
+          callbacks?.onProgress?.({ key, kind: artifact.kind, percent, status: 'verifying' });
+        };
+        // Native-speed path when the platform adapter provides one — see
+        // FastVerifyPort's own doc comment for why this exists at all
+        // (the portable readChunks()+HashPort path is fine in Node/tests,
+        // but confirmed catastrophically slow — ~1.9 hours for a 2.3GB
+        // file — over Capacitor's Filesystem bridge on a real device).
+        const valid = this.options.fastVerify
+          ? await this.options.fastVerify.sha256File(destinationPath, artifact.sha256, onVerifyProgress)
+          : await verifyChecksum(destinationPath, artifact.sha256, { fileSystem: this.fileSystem, hash: this.hash }, { onProgress: onVerifyProgress });
         if (!valid) {
           await this.fileSystem.deleteFile(destinationPath);
           state.status = 'failed';

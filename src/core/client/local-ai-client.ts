@@ -220,7 +220,9 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
     const sessionCache = new SessionCache(ports.llmRuntime, ports.fileSystem, { maxSlots: config.sessionCacheSlots });
     const modelRegistry = new ModelRegistry(ports.sqlite, ports.clock);
     const runtimeFacade = new RuntimeFacade(ports.llmRuntime);
-    const downloadEngine = new DownloadEngine(ports.downloadTransport, ports.fileSystem, ports.hash, ports.sqlite, ports.clock);
+    const downloadEngine = new DownloadEngine(ports.downloadTransport, ports.fileSystem, ports.hash, ports.sqlite, ports.clock, {
+      fastVerify: ports.fastVerify,
+    });
     const lifecycleManager = new LifecycleManager(ports.llmRuntime, ports.sqlite);
     // LOG.2/LOG.3 — always constructed (the `logs` table always exists once
     // migrated); the opt-in gate is `config.logging?.enabled` at dispatch
@@ -522,7 +524,19 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
     );
 
     if (!this.modelLoaded) {
-      await this.ports.llmRuntime.loadModel({ modelPath: destinationPath, contextLength: artifact.contextLength });
+      // See DownloadProgress's own doc comment on 'loading' — the download+
+      // verify pipeline is already done (status: 'completed') by this
+      // point; this is a distinct, separately-visible phase so a UI doesn't
+      // read "still stuck at 100%, nothing happening" while a multi-GB GGUF
+      // is being parsed/mapped into the runtime.
+      options?.onProgress?.({ key: artifact.filename, kind: 'model', percent: 100, status: 'loading' });
+      // toAbsolutePath(): destinationPath is relative to this port's own
+      // storage convention (Directory.Data on Android) — the native
+      // llama.cpp binding behind loadModel() has no concept of that and
+      // needs a genuine absolute path (see FileSystemPort.toAbsolutePath()'s
+      // doc comment).
+      const absoluteModelPath = await this.ports.fileSystem.toAbsolutePath(destinationPath);
+      await this.ports.llmRuntime.loadModel({ modelPath: absoluteModelPath, contextLength: artifact.contextLength });
       this.modelLoaded = true;
       // Registers this as "current" even on a completely fresh install (no
       // prior row) — switchModel() needs an accurate baseline to compute
@@ -559,7 +573,9 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
     );
 
     if (!this.embeddingLoaded) {
-      await this.ports.llmRuntime.loadEmbeddingModel({ modelPath: destinationPath });
+      options?.onProgress?.({ key: artifact.filename, kind: 'embedding', percent: 100, status: 'loading' });
+      const absoluteModelPath = await this.ports.fileSystem.toAbsolutePath(destinationPath);
+      await this.ports.llmRuntime.loadEmbeddingModel({ modelPath: absoluteModelPath });
       this.embeddingLoaded = true;
       await this.modelRegistry.setCurrent('embedding', {
         id: artifact.id,
@@ -621,7 +637,9 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
 
     await this.sessionCache.invalidateAll(); // step 7
 
-    await this.ports.llmRuntime.loadModel({ modelPath: destinationPath, contextLength: artifact.contextLength });
+    options?.onProgress?.({ key: artifact.filename, kind: 'model', percent: 100, status: 'loading' });
+    const absoluteModelPath = await this.ports.fileSystem.toAbsolutePath(destinationPath);
+    await this.ports.llmRuntime.loadModel({ modelPath: absoluteModelPath, contextLength: artifact.contextLength });
     this.modelLoaded = true;
     await this.emit('runtime:model-loaded', { modelId: artifact.id, version: artifact.version });
   }
@@ -675,7 +693,9 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
       dimensionsChanged: previousArtifact ? previousArtifact.dimensions !== artifact.dimensions : true,
     });
 
-    await this.ports.llmRuntime.loadEmbeddingModel({ modelPath: destinationPath });
+    options?.onProgress?.({ key: artifact.filename, kind: 'embedding', percent: 100, status: 'loading' });
+    const absoluteModelPath = await this.ports.fileSystem.toAbsolutePath(destinationPath);
+    await this.ports.llmRuntime.loadEmbeddingModel({ modelPath: absoluteModelPath });
     this.embeddingLoaded = true;
     await this.emit('runtime:embedding-loaded', { embeddingId: artifact.id, version: artifact.version });
   }
@@ -849,9 +869,28 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
         status: completion.status,
         createdAt: this.ports.clock.nowIso(),
         tokenCount: completion.tokenCount,
+        // Carries the underlying exception's message through to the
+        // persisted row on a failure — see CompletionResult.errorMessage's
+        // doc comment for why this exists (2026-08-19 live bug: an error
+        // with genuinely zero diagnostic trail anywhere).
+        ...(completion.errorMessage || completion.reasoningContent
+          ? {
+              metadata: {
+                ...(completion.errorMessage ? { errorMessage: completion.errorMessage } : {}),
+                // `content` above is already the tag-stripped answer (see
+                // CompletionResult.reasoningContent's doc comment) — this is
+                // purely so a UI can optionally show "thought for N chars"
+                // without needing to re-parse anything.
+                ...(completion.reasoningContent ? { reasoningContent: completion.reasoningContent } : {}),
+              },
+            }
+          : {}),
       };
       await this.conversationStore.addMessage(chatId, assistantMessage);
       await this.emit('chat:message-appended', { chatId, messageId: assistantMessageId, role: 'assistant' });
+      if (completion.status === 'error') {
+        await this.dispatchLog('error', `sendMessage() generation failed: ${completion.errorMessage ?? '(no error detail from runtime adapter)'}`);
+      }
 
       if (completion.status === 'complete') {
         await this.sessionCache.save(chatId, modelFingerprint).catch(() => undefined); // best-effort, TZ §9.3 step 4

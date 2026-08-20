@@ -25,6 +25,23 @@ export interface FileSystemPort {
   /** Joins segments under the library's storage root (`LocalAiConfig.storageDirectory`, TZ §10). */
   resolvePath(...segments: string[]): string;
   /**
+   * Resolves a path this port itself produced (via `resolvePath()`) to a
+   * genuine, absolute filesystem path. Needed wherever a path crosses into
+   * code that has no concept of this port's own relative+directory
+   * convention — in particular `LlmRuntimePort.loadModel()` /
+   * `loadEmbeddingModel()` / `loadSession()` / `saveSession()`, which hand
+   * the path straight to the native llama.cpp binding.
+   *
+   * Confirmed live on Android, 2026-08-19: passing `resolvePath()`'s
+   * relative-path output straight to `LlmRuntimePort.loadModel()` made
+   * `initLlama()` try several hardcoded path guesses, none of which matched
+   * the file's real `Directory.DATA`-relative location, and it silently
+   * failed to load any model — while every other `FileSystemPort` call
+   * (`exists()`, `stat()`, etc.) kept working fine, since those stay inside
+   * this port's own relative-path convention.
+   */
+  toAbsolutePath(path: string): Promise<string>;
+  /**
    * Bytes free on the volume backing `path` (SEC.3,
    * `docs/decisions.md`'s "Security audit (2026-08-11)" section) —
    * `DownloadEngine.downloadArtifact()` checks this against
