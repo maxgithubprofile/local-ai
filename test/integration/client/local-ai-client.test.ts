@@ -352,6 +352,61 @@ describe('LocalAiClient', () => {
     });
   });
 
+  // perf-tuning plan §7 (docs/plans/llama2/2026-08-20-local-ai-perf-tuning-plan.md):
+  // ensureModelReady() fires a best-effort, non-awaited bench() after a
+  // fresh load and records 'tooSlow' when tgAvg is under the threshold —
+  // closing the gap where bench()/recordVerdict() existed but nothing ever
+  // called them together (§1). All assertions poll via vi.waitFor() because
+  // the producing call is deliberately fire-and-forget, not awaited by
+  // ensureModelReady() itself.
+  describe('bench() → tooSlow verdict (perf-tuning plan §7)', () => {
+    it('does not record a tooSlow verdict when bench() tgAvg is above the threshold', async () => {
+      llmRuntime.scriptedBenchTgAvg = 10; // default tooSlowTokPerSec is 3
+      const client = await LocalAiClient.create({ manifestUrl, ports });
+      await client.refreshManifest();
+
+      await client.ensureModelReady();
+      await new Promise((resolve) => setTimeout(resolve, 20)); // let the fire-and-forget bench()+recordVerdict() (real sqlite I/O) settle either way
+
+      const report = await client.checkDeviceEligibility('model');
+      expect(report.verdict).toBe('ok'); // unaffected — no verdict was ever persisted
+    });
+
+    it('records a tooSlow verdict, visible on the next checkDeviceEligibility() as "tight", when bench() tgAvg is below the threshold', async () => {
+      llmRuntime.scriptedBenchTgAvg = 1; // below default tooSlowTokPerSec (3)
+      const client = await LocalAiClient.create({ manifestUrl, ports });
+      await client.refreshManifest();
+
+      await client.ensureModelReady();
+      await vi.waitFor(async () => {
+        const report = await client.checkDeviceEligibility('model');
+        expect(report.verdict).toBe('tight');
+      });
+    });
+
+    it('respects a configured tooSlowTokPerSec instead of the default 3', async () => {
+      llmRuntime.scriptedBenchTgAvg = 4; // above default 3, below a custom 5
+      const client = await LocalAiClient.create({ manifestUrl, ports, tooSlowTokPerSec: 5 });
+      await client.refreshManifest();
+
+      await client.ensureModelReady();
+      await vi.waitFor(async () => {
+        const report = await client.checkDeviceEligibility('model');
+        expect(report.verdict).toBe('tight');
+      });
+    });
+
+    it('does not reject ensureModelReady() when bench() itself throws (best-effort, TZ-style soft dependency)', async () => {
+      llmRuntime.bench = async () => {
+        throw new Error('native bench() crashed');
+      };
+      const client = await LocalAiClient.create({ manifestUrl, ports });
+      await client.refreshManifest();
+
+      await expect(client.ensureModelReady()).resolves.toBeUndefined();
+    });
+  });
+
   // getDownloadProgress() — added 2026-08-19 so a consumer can show "resume
   // from X%" before the user taps download, rather than only finding out
   // once ensureModelReady() is already moving (docs/decisions.md's

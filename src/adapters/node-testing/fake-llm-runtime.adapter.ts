@@ -23,6 +23,8 @@ export class FakeLlmRuntimeAdapter implements LlmRuntimePort {
   scriptedOutcome: 'complete' | 'error' | 'hang' = 'complete';
   scriptedEmbedding: Float32Array = new Float32Array([1, 0, 0, 0]);
   scriptedTokenCount = 3;
+  /** Configurable `bench()` result — lets tests drive the perf-tuning plan §7 `tooSlow`-verdict path from either side of a threshold. */
+  scriptedBenchTgAvg = 42;
 
   // Optional here even though LlmRuntimePort declares these required —
   // several pre-existing tests call loadModel()/loadEmbeddingModel() with no
@@ -93,7 +95,7 @@ export class FakeLlmRuntimeAdapter implements LlmRuntimePort {
   }
 
   async bench(): Promise<{ tgAvg: number }> {
-    return { tgAvg: 42 };
+    return { tgAvg: this.scriptedBenchTgAvg };
   }
 
   readonly savedSessionPaths: string[] = [];

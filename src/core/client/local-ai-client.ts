@@ -85,6 +85,17 @@ export interface LocalAiConfig {
    * yet wired here.
    */
   runtimeTuning?: { threads?: number; batchSize?: number; ubatchSize?: number };
+  /**
+   * TZ §6.2's `tooSlow` threshold — `tgAvg < tooSlowTokPerSec` after
+   * `LlmRuntimePort.bench()`, recorded as a `LocalRuntimeVerdict` (TZ §6.3)
+   * so the *next* {@link checkDeviceEligibility} call downgrades to
+   * `'tight'`. Default `3`, per TZ §6.2's own table ("ниже — UX чата
+   * неприемлем"). See
+   * `docs/plans/llama2/2026-08-20-local-ai-perf-tuning-plan.md` §7 for why
+   * this is wired here — `bench()`/`recordVerdict()` already existed but
+   * nothing ever called them together.
+   */
+  tooSlowTokPerSec?: number;
   ports?: Partial<LocalAiPorts>;
   /**
    * Pluggable callback — called for every internal log event regardless of
@@ -577,6 +588,22 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
         sizeBytes: artifact.sizeBytes,
       });
       await this.emit('runtime:model-loaded', { modelId: artifact.id, version: artifact.version });
+      // TZ §6.3's tooSlow producer (perf-tuning plan §7) — best-effort,
+      // deliberately not awaited: ensureModelReady() must not block on an
+      // extra real-inference bench() run on top of an already potentially
+      // slow model load. The verdict this writes is for the *next*
+      // checkDeviceEligibility() call, not this one, so there's nothing for
+      // the caller of ensureModelReady() to wait for.
+      if (this.ports.llmRuntime.bench) {
+        void this.ports.llmRuntime
+          .bench()
+          .then((r) => {
+            if (r.tgAvg < (this.config.tooSlowTokPerSec ?? 3)) {
+              return this.eligibilityService.recordVerdict(artifact.id, artifact.version, 'tooSlow');
+            }
+          })
+          .catch(() => undefined); // best-effort — bench() failing must never surface as ensureModelReady() failing
+      }
     }
   }
 
