@@ -121,18 +121,66 @@ Migrate the pinned native inference dependency from `llama-cpp-capacitor@^0.1.5`
   (its own doc updated accordingly) — if `0.1.5` really only forwarded 3 of the sampling parameters
   on Android, most of that plan's parameter work would have been measuring a no-op on the old
   package.
-- **Before this migration is considered complete**, the following need a real device
-  (`forta.chat`'s `device-ai-loop.md`), not just `npm test`:
-  1. Session-persistence timing comparison (first-token latency, message 1 vs. message 2 in the same
-     chat) — before/after, to confirm `SessionCache` actually benefits.
-  2. APK size delta, recorded into `forta.chat`'s `docs/plans/llama2/decisions.md` next to the
-     existing "+24 MB" measurement.
-  3. Full `device-ai-loop.md` smoke pass (download → load → send → stream → cancel → switch chats).
-  4. Re-check whether the jinja `minja` destructure bug (adapter's fallback-retry comment,
-     2026-08-19) still reproduces.
-  5. Re-check the `n_predict = 50` JNI substitution bug (`runtime-facade.ts`). If confirmed fixed,
-     `RuntimeFacade`'s `DEFAULT_COMPLETION_MAX_TOKENS` choke point is kept regardless — it protects
-     against any plugin's undocumented default, not just this one.
+- **Device verification, real-device pass 2026-08-20** (`forta.chat`'s `device-ai-loop.md`, Qwen3-4B
+  Q4_K_M, same phone throughout) — see `docs/decisions.md`'s "Session persistence was permanently
+  broken on Android" and "No per-token streaming on Android" entries (2026-08-20) for the two items
+  found and fixed earlier in that pass, and `forta.chat`'s own `decisions.md` for the APK-size
+  re-measurement (item 2 below). Status of the five original items:
+  1. **Session-persistence — fixed and confirmed live**, but the *comparison* this item asked for
+     turned out to be the wrong experiment: two messages sent back-to-back in one still-open chat
+     reuse the same in-memory `LlamaContext` (no `loadSession` call happens at all — confirmed via
+     logcat, only `saveSession` fires, after each turn) so this pair never exercises the disk-based
+     `SessionCache.activate()`/`loadSession()` path in the first place. What *was* confirmed: both
+     bugs from the "Session persistence was permanently broken" entry are fixed —
+     `saveSession` now succeeds and produces a real, growing `.bin` file (25.5 MB after turn 1, 93.2 MB
+     after turn 2, correct un-encoded `qwen3-4b:1.bin` filename). What's still open: a genuine
+     cold-reload comparison (switch away from the chat or restart the app, then send another message)
+     to see whether `loadSession` actually cuts prefill time versus a fully cold context — not done
+     in this pass (time budget), tracked in `forta.chat`'s perf-tuning-plan.md §9.
+  2. **APK size delta — measured, and it's the opposite of what this ADR expected.**
+     `gradlew assembleSideloadDebug --rerun-tasks` (same method as the historical "+24 MB" entry):
+     total APK **137,526,865 bytes (~131.2 MB)**, up from `llama-cpp-capacitor@0.1.5`'s
+     132,024,519 bytes — **+5.5 MB, not smaller**. `lib/arm64-v8a/libllama-cpp-arm64.so` itself:
+     89,395,384 bytes uncompressed / 24,811,281 compressed (up from 68,740,712 / 19,683,547 on
+     `0.1.5`). Root cause: this ADR's "`.so` size" finding (item 5, ~6.8 MB stripped) compared the
+     **precompiled binary shipped inside the npm tarball** — but Gradle's build for this plugin runs
+     `configureCMakeDebug[arm64-v8a]`/`buildCMakeDebug[arm64-v8a]` and genuinely **recompiles the
+     native code from source** for a debug APK (confirmed: `stripSideloadDebugDebugSymbols` logs
+     "Unable to strip... libllama-cpp-arm64.so... packaging them as they are" — an unstripped
+     Debug-config CMake build, not the vendor's stripped artifact). The tarball's precompiled `.so`
+     was never the thing that actually ships in this build. A **release** build (optimized,
+     strippable) may narrow or reverse this gap — not measured here, don't assume either direction
+     without measuring it directly. Full writeup: `forta.chat`'s `docs/plans/llama2/decisions.md`.
+  3. **Smoke pass — clean.** `npm run cap:run` install/launch, no crash signal; multi-turn chat
+     (2 real generations, 141 + 433 tokens) completed successfully end to end.
+  4. **jinja `minja` bug — not reproduced.** `initContext`'s own model-info log line shows
+     `chatTemplates={minja={default=true, ...}, llamaChat=true}` for the installed Qwen3-4B GGUF
+     (populated, not `undefined` — the exact metadata whose absence caused the original
+     "Cannot destructure property 'minja'" crash). No "Cannot destructure" line appeared across
+     ~35k captured log lines spanning two full generations. Caveat: `RuntimeFacade` routes this model
+     through mechanism 2 (`jinja:false`, caller-formatted prompt) directly — no mechanism-1 attempt
+     was observed in the log at all, so the fallback-retry path itself was never exercised; the
+     populated `chatTemplates.minja` is strong but not 100%-direct confirmation mechanism 1 wouldn't
+     still throw for this exact model.
+  5. **`n_predict = 50` substitution bug — not reproduced.** Both live generations stopped correctly
+     at their natural EOS (`stopped_eos:true`, `has_next_token=false`) after 141 and 433 tokens
+     respectively — neither cut off anywhere near 50. `RuntimeFacade`'s `DEFAULT_COMPLETION_MAX_TOKENS`
+     choke point is kept regardless (per the original decision) — it structurally prevents this
+     specific check from ever proving the *native* default is fixed, only that the app-level
+     workaround continues to do its job.
+- **New finding, not one of the original five:** prompt-eval (prefill) throughput does **not** show a
+  clear win from context reuse even within the *same* warm in-memory context across consecutive turns
+  — turn 1 evaluated 42 prompt tokens in 22.8 s (~1.84 tok/s), turn 2 evaluated a 226-token prompt
+  (the full turn-1 exchange plus the new message) in 159.8 s (~1.41 tok/s) — slower per-token, not
+  faster, consistent with plain per-token attention cost growing with context length rather than any
+  cache being skipped. Generation throughput stayed flat around ~1.0–1.1 tok/s in both turns. These are
+  now `forta.chat`'s perf-tuning-plan.md §9 baseline numbers.
+- **Also confirmed this pass, not one of the original five:** no per-token streaming on Android at all
+  (`docs/decisions.md`'s "No per-token streaming on Android" entry, 2026-08-20) — `onToken` never
+  fires; the full reply renders at once when `completion()` resolves. This changes what "first-token
+  latency" means for the whole perf-tuning plan: on Android today there is no visible progress until
+  generation is entirely done, so total round-trip time (not time-to-first-token) is the number that
+  actually matches what a user experiences.
 - **Rollback:** trivial — both npm names remain published (`llama-cpp-capacitor`'s publishes are not
   being pulled per its own changelog), so reverting is `package.json` back to
   `llama-cpp-capacitor@^0.1.5` + reinstall + `cap sync`, no data migration involved.

@@ -126,4 +126,32 @@ describe('RuntimeFacade', () => {
     expect(result.status).toBe('cancelled');
     expect(facade.isBusy).toBe(false);
   });
+
+  it('waitUntilIdle() resolves immediately when nothing is in flight', async () => {
+    const runtime = new FakeLlmRuntimeAdapter();
+    const facade = new RuntimeFacade(runtime);
+
+    await expect(facade.waitUntilIdle()).resolves.toBeUndefined();
+  });
+
+  it('waitUntilIdle() only resolves once the in-flight generation settles', async () => {
+    const runtime = new FakeLlmRuntimeAdapter();
+    runtime.scriptedOutcome = 'hang';
+    const facade = new RuntimeFacade(runtime);
+    const controller = new AbortController();
+
+    const stream = facade.complete({ messages: [{ role: 'user', content: 'hi' }] }, { chatTemplate: 'auto' }, controller.signal);
+
+    let idled = false;
+    const idlePromise = facade.waitUntilIdle().then(() => {
+      idled = true;
+    });
+    await Promise.resolve();
+    expect(idled).toBe(false); // generation still hanging — must not resolve early
+
+    controller.abort();
+    await stream.result;
+    await idlePromise;
+    expect(idled).toBe(true);
+  });
 });

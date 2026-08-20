@@ -505,3 +505,226 @@ phone was enough, same lesson as the two SQLite bugs above: this class of bug is
 `pnpm test` not because it's inherently hard to catch, but because the Node-fake adapters
 (`NodeFsAdapter`, `FakeLlmRuntimeAdapter`) were both slightly *more* forgiving than the real native
 plugin/Capacitor Filesystem behavior they stand in for.
+
+### No per-token streaming on Android, confirmed — closes ADR 0001/0008's residual risk (2026-08-20)
+
+**Context:** `forta.chat` reported AI replies rendering all at once instead of typing in, on a real
+Android device. Before this entry, that was an open, documented risk — ADR 0001 (2026-08-10) flagged
+"whether the callback in `completion()` fires reliably per-token on both Android and iOS builds" as
+"not verifiable here, needs Phase 4's manual device smoke test," and ADR 0008 (this migration) still
+listed "Full `device-ai-loop.md` smoke pass (…→ stream →…)" as an open item. This is that smoke test.
+
+**What was checked:** a temporary counter/timestamp log in `LlamaCppCapacitorAdapter`'s `onToken`
+callback (`llama-cpp-capacitor.adapter.ts`), a real device, and a fresh chat with a short prompt to
+avoid a multi-minute prefill on the prior long-context chat confounding the result (that chat's
+988-token prompt genuinely took the CPU 460%+/several minutes just to load — a real, separate
+CPU-inference-speed concern, not this one). Result: **`onToken` never fired, not even once**, across a
+clean ~17s generation (`скажи одно слово` → `Свет.`, 3 tokens, confirmed via `adb logcat`).
+
+**Root cause, confirmed by reading the installed package, not guessed:**
+- Native generation genuinely IS per-token — `adb logcat`'s `LlamaCpp`/`RNLlama` tags show `Generating
+  token 1...` / `Generated token 1 (ID: 19311): С` / `Generating token 2...` etc., one at a time, in
+  real wall-clock time (~1 token/second on this device).
+- The JS wrapper (`llama-cpp-pro@0.2.4`, `dist/esm/index.js`) does its side correctly: `completion()`
+  sets `emit_partial_completion: !!callback` and registers `LlamaCpp.addListener(EVENT_ON_TOKEN, ...)`
+  before calling native `completion()` — this is genuinely wired to invoke the caller's callback per
+  token, exactly as documented.
+- But `node_modules/llama-cpp-pro/android/src/main/java/ai/annadata/plugin/capacitor/*.java` —
+  `LlamaCppPlugin.java`, `LlamaCpp.java` — contain **zero** occurrences of `notifyListeners`, `onToken`,
+  or `EVENT_ON_TOKEN` anywhere (`grep -rl` across the whole `android/src` tree came back empty).
+  `completion()` on the Java side is one blocking call into `completionNative()` (JNI) that returns the
+  full `NativeCompletionResult` once, at the end. Whatever "Generating token N..." logging is doing
+  internally, on this platform there is currently no code path that could ever surface it as a
+  Capacitor event — `emit_partial_completion: true` has nothing to be received by. Latest published
+  version is `0.2.4` (confirmed via `npm view llama-cpp-pro versions` — nothing newer to upgrade to).
+
+**This is an upstream `llama-cpp-pro` Android gap, not a `local-ai` bug** — every layer downstream of
+`onToken` (`AsyncTokenQueue`, `LocalAiClient.sendMessage()`'s own forwarding loop, `forta.chat`'s
+`ai-chat-store.ts` `for await` loop into `streamingContent`) is correct and does stream token-by-token
+whenever tokens actually arrive; this was re-confirmed by re-reading all four layers against this
+finding, not assumed. Nothing to fix in `local-ai`'s adapter — a synthetic single-chunk emission once
+`completion()` resolves was considered (ADR 0001's own stated fallback for exactly this case) and
+skipped: the caller already receives the full content via `stream.result` either way (`forta.chat`'s
+`ai-chat-store.ts` persists the final message from local-ai's own Dexie write, not from the stream), so
+a synthetic chunk would only relabel the existing "appears all at once" behavior, not change it. Left
+documented in `onToken`'s own doc comment in `llama-cpp-capacitor.adapter.ts` for the next person who
+goes looking. A real per-token typing UX on Android needs either an upstream fix/PR against
+`llama-cpp-pro`'s Android plugin (add the missing `notifyListeners` wiring in `LlamaCppPlugin.java`) or
+a client-side simulated-typing animation over the final text in `forta.chat` — both out of scope for
+this entry, product/eng call to make separately.
+
+**Not checked:** iOS. ADR 0001's per-token risk was always "both Android and iOS" — this entry only
+closes the Android half. iOS's native plugin source wasn't inspected here (no iOS device in this
+session) and may or may not have the same gap.
+
+### Android per-token streaming fixed — missing `notifyListeners` wiring added upstream (2026-08-20)
+
+**Context:** Direct follow-up to the entry above. Fixes the exact gap that entry found: `jni.cpp`'s
+token-generation loop genuinely runs per-token, but nothing on the Java side ever forwarded a token to
+the Capacitor bridge.
+
+**Fix, patched into the installed `llama-cpp-pro@0.2.4` package (`forta.chat`'s `node_modules`, applied
+via `patch-package`, see below):**
+- `jni.cpp`'s completion loop now calls a new `LlamaCpp.emitPartialToken(int contextId, String token)`
+  once per generated token (`env->CallVoidMethod`, method ID looked up once outside the loop, gated on
+  the existing `emit_partial_completion` param — no per-token JNI lookup overhead added).
+- `LlamaCpp.java` gained that method: builds the `{contextId, tokenResult: {token}}` payload the JS
+  wrapper's `completion()` already listens for (`dist/esm/index.js`, unchanged — its side was already
+  correct per the entry above) and forwards it to `LlamaCppPlugin.emitTokenEvent()`.
+- `LlamaCppPlugin.java` gained `emitTokenEvent()` — a thin package-visible wrapper around
+  `Plugin.notifyListeners()`, needed because `notifyListeners` is `protected` on Capacitor's base
+  `Plugin` class and `LlamaCpp` is a separate, non-subclassing object. Found by real compilation, not
+  by reading: `LlamaCpp` now takes the plugin instance via a new `LlamaCpp(Context, LlamaCppPlugin)`
+  constructor (old single-arg constructor kept for any other call sites/tests), and
+  `LlamaCppPlugin.load()` passes `this`.
+- Calls `notifyListeners("@LlamaCpp_onToken", event)` — the exact event name/payload shape the JS side
+  was already waiting for, so nothing downstream needed to change.
+
+**Verified on-device (P80, 2026-08-20), not just compiled:** native (CMake/NDK) build and the full
+`forta.chat` `assembleDebug` both succeeded; installed via `npm run cap:run` (a prior `adb install -r`
+of a standalone APK had actually left a **stale** web bundle on the device — the AI tab silently didn't
+render because of it, unrelated to this fix but worth remembering: always redeploy through the project's
+normal `cap:run` pipeline, not an ad hoc APK install, when verifying anything that also touches the web
+bundle). Sent a real message through an existing AI chat and watched `adb logcat` live:
+```
+16:42:28.054 I/LlamaCpp: Generated token 1 (ID: 16206): В
+16:42:28.055 V/Capacitor/LlamaCppPlugin: Notifying listeners for event @LlamaCpp_onToken
+16:42:28.971 I/LlamaCpp: Generated token 2 (ID: 50695): аш
+16:42:28.971 V/Capacitor/LlamaCppPlugin: Notifying listeners for event @LlamaCpp_onToken
+...
+```
+`Notifying listeners for event @LlamaCpp_onToken` fires immediately after every single `Generated
+token N` line, at the same ~1 tok/s cadence this file's baseline entry measured — confirms real
+per-token delivery, not a batched/synthetic emission. Not yet re-verified that `forta.chat`'s UI
+actually renders the incremental typing effect end-to-end (downstream layers were already re-confirmed
+correct by reading in the entry above; this session watched the native/bridge layer only) — worth a
+quick visual pass, not expected to be a real risk given that re-confirmation.
+
+**`patch-package` note:** `forta.chat`'s `patches/llama-cpp-pro+0.2.4.patch` captures this fix (`LlamaCpp.java`,
+`LlamaCppPlugin.java`, `jni.cpp`). Generating it required first deleting
+`node_modules/llama-cpp-pro/android/{build,.cxx}` (Gradle/CMake's own build-cache output, regenerated by
+the next build regardless) — `patch-package` unconditionally `git add -f`s the whole package tree before
+diffing, and one of Gradle's deeply-nested transform paths there exceeded Windows git's filename-length
+limit, failing the patch generation entirely (`--exclude` doesn't help — it only trims the final diff,
+not the initial add). The generated patch also contains a `Binary files ... differ` hunk for the
+vendored `jniLibs/arm64-v8a/libllama-cpp-arm64.so` — that hunk carries no actual patch data (git didn't
+emit a binary patch for it) so `patch-package`'s apply step is a no-op for that file. Harmless: the
+`.so` is rebuilt from the now-patched `jni.cpp`/`CMakeLists.txt` by every real Gradle build (confirmed —
+this session's `assembleDebug` ran `buildCMakeDebug[arm64-v8a]`, not `UP-TO-DATE`), so the stale vendored
+binary a fresh `npm install` would leave in place never actually ships; flagging only so a future reader
+doesn't assume the `.so` hunk is doing something it isn't.
+
+**Still open:** iOS has the same class of gap, but broader — see next entry.
+
+### iOS: `notifyListeners` unimplemented in `llama-cpp-pro`'s Swift plugin entirely, not just for tokens (2026-08-20)
+
+**Finding, confirmed by reading (no iOS device in this session — source-only, same caveat as ADR 0001's
+original iOS-side risk):** `grep -rc notifyListeners node_modules/llama-cpp-pro/ios/Sources` returns
+zero across all four Swift files (`LlamaCpp.swift`, `LlamaCppPlugin.swift`, `LlamaNativeBridge.swift`,
+`ModelAdmissionController.swift`). This is broader than the Android gap the two entries above closed —
+Android's problem was specifically the token-streaming path; iOS's `LlamaCppPlugin.swift` never calls
+`Plugin.notifyListeners()` for **any** event at all, not just `@LlamaCpp_onToken`. Whatever
+`addListener`-based event contract the JS wrapper (`dist/esm/index.js`) expects from the native side,
+none of it can currently fire on iOS.
+
+**Not fixed here** — out of scope for this Android-focused session (no iOS device to verify against, and
+the fix shape may differ from Android's `emitPartialToken`/`emitTokenEvent` plumbing since Swift's
+`Plugin.notifyListeners()` isn't gated behind a `protected` visibility problem the way Capacitor's
+Android base class is). Logged so the next person working on iOS parity for this plugin doesn't have to
+rediscover it — same "don't guess silently" reasoning as the rest of this ledger. A real fix needs the
+same treatment as the Android one: read `llama-cpp-pro`'s Swift completion loop, find where per-token
+(and any other streamed) results are computed, and add the missing `notifyListeners()` call(s) at that
+point.
+
+### iOS token-streaming patch drafted (source-read only, not built/verified — 2026-08-20)
+
+**Context:** Direct follow-up, same day, no iOS device/Mac available in this environment either — user
+asked for a patch to apply and verify later on a Mac, scoped narrowly to `@LlamaCpp_onToken` (parity
+with the Android fix above), not the full "no event fires at all" gap the previous entry found.
+
+**Good news found while drafting:** unlike Android, this did **not** need a C++ change. Reading
+`cpp/cap-ios-bridge.cpp` turned up `llama_completion_stream(context_id, params_json, token_callback,
+user_data)` — a per-token-callback C function that **already exists**, explicitly commented "Streaming
+completion with per-token C callback (all native/desktop targets)", sitting unused: iOS's
+`LlamaNativeBridge.swift` only ever called the non-streaming `llama_run_completion`. So the drafted fix
+is Swift-only:
+- `LlamaNativeBridge.swift`: new `runCompletionStream()`, `dlsym`-loading `llama_completion_stream` and
+  bridging its C callback to a Swift closure via a `TokenBox` boxed through `Unmanaged`/`void *user_data`
+  (`@convention(c)` closures can't capture Swift context directly).
+- `LlamaCpp.swift`: new `onPartialToken` closure property (Swift-idiomatic analog of Android's
+  `LlamaCpp(Context, LlamaCppPlugin)` back-reference); `completion()` now checks the JS-side
+  `emit_partial_completion` param (same gate Android/the JS wrapper already use) and calls
+  `runCompletionStream()` instead of `runCompletion()` when set, falling back to the non-streaming path
+  on `.missingSymbol` (fails closed, mirrors Android's "method not found → streaming disabled, call
+  still succeeds" behavior).
+- `LlamaCppPlugin.swift`: first `notifyListeners()` call this plugin has ever had, added in a new
+  `override func load()`, wired to `implementation.onPartialToken`.
+
+**Explicitly not verified — every `TODO(mac)` inline in the patch needs a real build to resolve:**
+whether `llama_completion_stream` is actually compiled into the currently-vendored/rebuildable
+`ios/Frameworks/llama-cpp.xcframework` (the function existing in `cpp/` doesn't guarantee it survived
+into that binary); whether `notifyListeners()` needs a main-thread hop (it fires from the background
+queue `LlamaCpp.completion()` already dispatches onto — Android's JNI thread tolerated this, iOS
+unconfirmed); the exact `notifyListeners(_:data:)` signature on the installed Capacitor iOS SDK (no
+existing call site in this plugin to copy, per the previous entry's zero-occurrences finding); and
+whether `llama_completion_stream`'s result JSON — which always reports empty `reasoning_content`,
+`stopped_word`, `stopping_word` (unlike `llama_run_completion`) — causes any visible regression for
+`<think>`-block or `stop`-param-dependent prompts.
+
+**Patch file:** `docs/patches/llama-cpp-pro+0.2.4-ios-token-streaming.patch` (+ that directory's
+`README.md` for apply/rebuild/verify steps). Not applied to this repo's own `node_modules` on disk —
+kept as a patch to apply (via `patch-package`, same convention as the Android fix) in whichever project
+actually builds for iOS.
+
+### ADR 0008 §7 device-verification checklist closed out, baseline `tgAvg` recorded (2026-08-20)
+
+**Context:** Continuation of the same device-ai-loop session as the two entries above — closing out
+the five items ADR 0008 listed as still needing a real device, plus recording the baseline
+measurement `forta.chat`'s `docs/plans/llama2/2026-08-20-local-ai-perf-tuning-plan.md` §9 needs before
+any of its own phases (`n_threads`, `enable_thinking`, `n_batch`/`n_ubatch`, ...) land. Full detail on
+each of the five lives in ADR 0008's own "Consequences" section now (not duplicated here) — this entry
+covers method and the two numbers that matter downstream.
+
+**Method, for repeatability:** rather than DOM-scraping the chat UI for a "first token appeared" signal
+(unreliable — the no-per-token-streaming finding above means there IS no such signal, and
+`ChatVirtualScroller`'s virtualized DOM made `visibleTexts()` polling flaky besides), timing was read
+from two ground-truth sources instead:
+1. **`adb logcat`**, captured continuously to a file for the whole session — `LlamaCpp`'s own
+   `Loading prompt into completion context...` → `Beginning completion generation...` →
+   `Generated token N...` (one line per token, real wall-clock) → `Reached end-of-generation` gives
+   exact prefill-start/generation-start/per-token/generation-end timestamps directly, no client-side
+   inference needed.
+2. **The app's own SQLite DB**, pulled off-device with
+   `adb exec-out run-as com.forta.chat cat databases/local_ai_<id>SQLite.db > local.db` — critically
+   **`exec-out`, not `shell`**: `adb shell run-as ... cat > file` on this Windows setup silently
+   corrupts binary output (looked like `SQLite: database disk image is malformed` — actually a
+   LF→CRLF text-mode translation happening somewhere in the `shell` pipe; file size came back ~170
+   bytes larger than the on-device original). `exec-out` doesn't allocate a pty and is binary-safe;
+   the pulled file's size matched the device's `ls -la` exactly and `node --experimental-sqlite`
+   opened it cleanly. `chat_messages.created_at` gives exact send/complete wall-clock timestamps
+   without needing the UI to render anything.
+
+**Two real generations, same chat, same warm context** (Qwen3-4B Q4_K_M, `n_ctx=4096`, native default
+`n_threads`/`n_batch=512` — none of the perf-tuning plan's phases applied yet, this is the "before"
+baseline):
+
+| Turn | Prompt tokens evaluated | Prefill time | Prefill tok/s | Tokens generated | Generation time | Generation tok/s | Total round-trip |
+|---|---|---|---|---|---|---|---|
+| 1 | 42 | 22.8 s | 1.84 | 141 | 130.3 s | 1.08 | ~153 s |
+| 2 | 226 (full turn-1 history + new msg) | 159.8 s | 1.41 | 433 | 430.2 s | 1.01 | ~590 s |
+
+Generation throughput held flat (~1.0–1.1 tok/s) both turns, as expected. Prefill did **not** get
+faster on turn 2 despite most of its 226 tokens being a repeat of turn 1's already-evaluated
+prompt+reply (same in-memory `LlamaContext`, no `loadSession` call happened between turns — confirmed
+via logcat, `SessionCache.activate()` correctly recognized the context was already warm and skipped
+disk I/O entirely) — it got *slower* per-token (1.84 → 1.41 tok/s), consistent with plain
+per-token attention cost scaling with context length rather than any prefix being skipped. This is
+CPU-only `llama.cpp` behavior, not a `local-ai` bug — flagging it here because it means the *cold vs.
+warm* comparison ADR 0008 originally asked for (message 1 vs. message 2 in the same chat) doesn't
+actually test what it was meant to test; a real cold-reload comparison (force-stop/relaunch or switch
+away and back, then send a message) is still open, tracked in the perf-tuning-plan's own §9.
+
+**tgAvg for the perf-tuning plan's baseline row:** ~1.0–1.1 tok/s generation / ~1.4–1.8 tok/s prefill,
+this device, this model, no tuning applied — directly explains the "отвечает очень долго" complaints
+independent of the reasoning-phase/`enable_thinking` issue perf-tuning-plan.md's Фаза 2 targets: even a
+short reply's prefill+generation alone runs into minutes.

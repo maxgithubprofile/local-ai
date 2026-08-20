@@ -854,6 +854,42 @@ describe('LocalAiClient', () => {
     expect(llmRuntime.modelLoaded).toBe(false);
   });
 
+  it('autoUnloadOnBackground defers the release until an in-flight generation settles, instead of killing it mid-stream', async () => {
+    const client = await LocalAiClient.create({ manifestUrl, ports, autoUnloadOnBackground: true });
+    await client.refreshManifest();
+    await client.ensureModelReady();
+    const chat = await client.createChat({ title: 'Backgrounded mid-reply' });
+
+    llmRuntime.scriptedOutcome = 'hang';
+    const controller = new AbortController();
+    const stream = client.sendMessage(chat.id, 'hi', { signal: controller.signal });
+
+    // sendMessage() does real async work (persisting the user message,
+    // building the context window, activating the session cache) before it
+    // ever reaches runtimeFacade.complete() — wait for the fake runtime to
+    // actually be invoked, so backgrounding below genuinely lands mid-generation
+    // rather than racing ahead of it.
+    for (let i = 0; i < 50 && llmRuntime.completeCalls.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0)); // real I/O (sqlite/fs) is involved before complete() is reached, not just microtasks
+    }
+    expect(llmRuntime.completeCalls).toHaveLength(1);
+
+    const appLifecycle = ports.appLifecycle as FakeAppLifecycleAdapter;
+    appLifecycle.setActive(false);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Generation is still running — the context must NOT have been torn
+    // down out from under it.
+    expect(llmRuntime.modelLoaded).toBe(true);
+
+    controller.abort(); // let the hung generation settle (as 'cancelled')
+    await stream.result;
+    await Promise.resolve(); // let the deferred release's awaited doReleaseRuntime() settle
+
+    expect(llmRuntime.modelLoaded).toBe(false);
+  });
+
   it('ensureModelReady() emits download:failed on a checksum mismatch (previously declared but never emitted, LOG.3)', async () => {
     const v2Body = manifestBody();
     v2Body.model.sha256 = 'a'.repeat(64); // deliberately wrong — never matches MODEL_BYTES' real hash

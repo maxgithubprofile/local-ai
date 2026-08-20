@@ -35,6 +35,14 @@ going to the background, and — importantly — does **not** eagerly reload whe
 the foreground. The next real use lazily re-establishes the context, same as a manual
 `releaseRuntime()`.
 
+If the app backgrounds while a `complete()`/`sendMessage()` generation is still in flight, the
+release is **deferred** until that generation settles (`RuntimeFacade.waitUntilIdle()`) rather than
+tearing the native context down mid-stream — backgrounding never truncates/kills a reply already in
+progress. This only protects generation itself from the JS side; a consumer app whose process can be
+suspended/killed by the OS while backgrounded still needs its own platform-level mechanism (e.g. an
+Android foreground service) to keep the process alive long enough for that deferred release to ever
+run.
+
 ## `reload()`
 
 ```ts

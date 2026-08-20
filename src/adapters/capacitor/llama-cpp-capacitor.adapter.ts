@@ -95,6 +95,20 @@ export class LlamaCppCapacitorAdapter implements LlmRuntimePort {
     };
     signal?.addEventListener('abort', onAbort);
 
+    // Confirmed on a real Android device, 2026-08-19/20 (device-ai-loop,
+    // llama-cpp-pro@0.2.4): this callback never fires. Native generation IS
+    // genuinely per-token (logcat's `LlamaCpp`/`RNLlama` tags log "Generating
+    // token N..." one at a time, in real time) but the installed package's
+    // `android/src/**` Java sources (`LlamaCppPlugin.java`/`LlamaCpp.java`)
+    // contain zero `notifyListeners`/`onToken`/`EVENT_ON_TOKEN` code — grepped,
+    // confirmed empty — so the JS wrapper's `emit_partial_completion: true` is
+    // a no-op on Android; `context.completion()`'s promise only ever resolves
+    // once, at the very end, with the full text. This is an upstream
+    // llama-cpp-pro Android gap, not fixable from this adapter — see
+    // `docs/decisions.md`'s "no per-token streaming on Android" entry (closes
+    // ADR 0001/0008's "not verifiable without a device" residual risk, in the
+    // negative). Left as-is (not a synthetic-single-chunk workaround) because
+    // the caller already gets the full content via `stream.result` either way.
     const onToken = (data: { content?: string; token?: string }): void => {
       const chunk = data.content ?? data.token;
       if (!chunk) return;

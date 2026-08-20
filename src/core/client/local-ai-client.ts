@@ -262,8 +262,18 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
     }
 
     // TZ §11.2 — opt-in only, default false; never an eager reload on refocus.
+    // A background transition mid-generation must not rip the native context
+    // out from under an in-progress `complete()` call — when busy, the
+    // release waits for that generation to settle first
+    // (RuntimeFacade.waitUntilIdle's own doc comment). The `isBusy` check
+    // stays synchronous (no `waitUntilIdle()` await) in the common idle
+    // case so this doesn't shift the release by an extra microtask tick
+    // versus before this existed.
     if (config.autoUnloadOnBackground) {
-      lifecycleManager.enableAutoUnloadOnBackground(ports.appLifecycle, () => client.doReleaseRuntime(undefined, 'background'));
+      const release = (): Promise<void> => client.doReleaseRuntime(undefined, 'background');
+      lifecycleManager.enableAutoUnloadOnBackground(ports.appLifecycle, () =>
+        runtimeFacade.isBusy ? runtimeFacade.waitUntilIdle().then(release) : release(),
+      );
     }
 
     return client;

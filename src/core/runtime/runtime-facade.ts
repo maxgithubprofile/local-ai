@@ -24,12 +24,23 @@ async function* emptyAsyncIterable<T>(): AsyncIterable<T> {
  */
 export class RuntimeFacade {
   private busy = false;
+  private inFlight: Promise<void> = Promise.resolve();
 
   constructor(private readonly runtime: LlmRuntimePort) {}
 
   /** True while a generation started through this facade hasn't yet settled. */
   get isBusy(): boolean {
     return this.busy;
+  }
+
+  /** Resolves once the current generation (if any) has settled — immediately
+   *  if nothing is in flight. Lets a caller (e.g. `autoUnloadOnBackground`,
+   *  TZ §11.2) defer tearing down the runtime context until a generation
+   *  that's already running actually finishes, instead of ripping it out
+   *  from under an in-progress `complete()` call. Never rejects — settles on
+   *  the same tick `complete()`'s stream settles, error or not. */
+  async waitUntilIdle(): Promise<void> {
+    await this.inFlight;
   }
 
   complete(
@@ -69,6 +80,10 @@ export class RuntimeFacade {
     const result = stream.result.finally(() => {
       this.busy = false;
     });
+    this.inFlight = result.then(
+      () => undefined,
+      () => undefined,
+    );
 
     return { [Symbol.asyncIterator]: () => stream[Symbol.asyncIterator](), result };
   }

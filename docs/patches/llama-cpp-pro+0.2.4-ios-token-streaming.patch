@@ -1,0 +1,215 @@
+diff --git a/ios/Sources/LlamaCppCapacitor/LlamaNativeBridge.swift b/ios/Sources/LlamaCppCapacitor/LlamaNativeBridge.swift
+index ea2ae9f..9524255 100644
+--- a/ios/Sources/LlamaCppCapacitor/LlamaNativeBridge.swift
++++ b/ios/Sources/LlamaCppCapacitor/LlamaNativeBridge.swift
+@@ -31,6 +31,20 @@ enum LlamaNativeBridge {
+     private typealias ReleaseContextFn  = @convention(c) (Int64) -> Void
+     private typealias RunCompletionFn   = @convention(c) (Int64, UnsafePointer<CChar>) -> UnsafeMutablePointer<CChar>?
+     private typealias FreeResultFn      = @convention(c) (UnsafeMutablePointer<CChar>) -> Void
++    // PATCH (2026-08-20, local-ai per-token-streaming-ios, drafted off-device — see this
++    // typealias pair's call site, runCompletionStream(), for the full TODO(mac) list):
++    // matches cpp/cap-ios-bridge.cpp's existing `llama_completion_stream`'s C signature —
++    // `const char * llama_completion_stream(int64_t context_id, const char * params_json,
++    // void (*token_callback)(const char *token_text, void *user_data, int token_index),
++    // void *user_data)`. That function already exists upstream (comment there: "Streaming
++    // completion with per-token C callback (all native/desktop targets)") — this Swift
++    // bridge just never called it before this patch. Parameter order must stay in lockstep
++    // with the C declaration; if `cap-ios-bridge.cpp` ever changes it, this silently
++    // miscompiles into a crash (dlsym has no type info to catch a mismatch), not a
++    // compile error — worth re-diffing against the C header on the next `llama-cpp-pro`
++    // version bump.
++    private typealias TokenCallback         = @convention(c) (UnsafePointer<CChar>?, UnsafeMutableRawPointer?, Int32) -> Void
++    private typealias RunCompletionStreamFn = @convention(c) (Int64, UnsafePointer<CChar>, TokenCallback?, UnsafeMutableRawPointer?) -> UnsafeMutablePointer<CChar>?
+     private typealias StopCompletionFn  = @convention(c) (Int64) -> Void
+     private typealias RunEmbeddingJsonFn = @convention(c) (Int64, UnsafePointer<CChar>, UnsafePointer<CChar>) -> UnsafeMutablePointer<CChar>?
+     private typealias JsonOpFn          = @convention(c) (Int64, UnsafePointer<CChar>, UnsafePointer<CChar>) -> UnsafeMutablePointer<CChar>?
+@@ -109,6 +123,75 @@ enum LlamaNativeBridge {
+         return try decodeJsonDictionary(from: ptr, failure: .completionFailed("invalid JSON"))
+     }
+ 
++    // PATCH (2026-08-20, local-ai per-token-streaming-ios): per-token sibling of
++    // runCompletion() above, added to close the gap docs/decisions.md's "iOS:
++    // notifyListeners unimplemented..." entry logged (2026-08-20) — the JS wrapper
++    // (dist/esm/index.js) has always expected native per-token events, iOS just never sent
++    // any. Wraps `llama_completion_stream`, NOT a new native code path — see the
++    // typealias doc comment above for why no C++ changes were needed for this half of the
++    // fix.
++    //
++    // TODO(mac), in order of what would actually break this:
++    // 1. `sym("llama_completion_stream", ...)` may throw `.missingSymbol` if the currently
++    //    vendored `ios/Frameworks/llama-cpp.xcframework` predates this function being
++    //    compiled in. If so: `bash scripts/ensure-llama-ios-xcframework.sh` won't
++    //    necessarily rebuild it on its own — that script short-circuits on a cached
++    //    xcframework unless `EXPECTED_BUILD_PROFILE` changed (see the script), so you may
++    //    need to `rm -rf ios/Frameworks/llama-cpp.xcframework` first, or bump that
++    //    constant, to force a real rebuild against the current cpp/ sources. This patch's
++    //    LlamaCpp.swift call site already falls back to the non-streaming runCompletion()
++    //    on `.missingSymbol` (fails closed, same shape as Android's "method not found"
++    //    fallback), so a stale xcframework degrades to today's behavior rather than
++    //    crashing — but per-token streaming silently won't happen until it's rebuilt.
++    // 2. The C callback fires from wherever `llama_completion_stream`'s internal generation
++    //    loop runs (same background thread `LlamaCpp.completion()` already dispatches
++    //    onto, DispatchQueue.global(qos: .userInitiated) — see that file). Confirm
++    //    `Plugin.notifyListeners()` (called from `onPartialToken` in
++    //    LlamaCppPlugin.swift) is actually safe to call off the main thread — if not,
++    //    that closure needs a `DispatchQueue.main.async` hop.
++    // 3. `llama_completion_stream`'s result JSON (cap-ios-bridge.cpp, ~line 1067) always
++    //    sets `reasoning_content: ""` and doesn't run getPartialOutput()'s chat-format
++    //    parsing the way `llama_run_completion` does — the TS-side adapter
++    //    (llama-cpp-capacitor.adapter.ts's splitReasoningContent()) already nets raw
++    //    `<think>` blocks as a fallback, so this is expected to be harmless, but worth
++    //    an eyeball on a real `<think>`-using model.
++    // 4. Not verified: whether `llama_completion_stream` honors the same stop-word /
++    //    stopping_word bookkeeping `llama_run_completion` does (its result always reports
++    //    `stopped_word: ""`, `stopping_word: ""`) — check if any of local-ai's/the
++    //    consuming app's prompts actually depend on `stop` params for early termination
++    //    before trusting this path for those.
++    static func runCompletionStream(
++        contextId: Int64,
++        paramsJson: String,
++        onToken: @escaping (String) -> Void
++    ) throws -> [String: Any] {
++        let fn   = try sym("llama_completion_stream", RunCompletionStreamFn.self)
++        let free = try sym("llama_free_completion_result", FreeResultFn.self)
++
++        // Boxes the Swift closure so it can cross the C ABI as a `void *user_data` —
++        // `@convention(c)` function pointers can't capture Swift context directly.
++        // `passRetained`/`release()` keep the box alive exactly for this call's duration
++        // regardless of which exit path (success/throw) is taken.
++        final class TokenBox {
++            let onToken: (String) -> Void
++            init(_ f: @escaping (String) -> Void) { onToken = f }
++        }
++        let box = TokenBox(onToken)
++        let userData = Unmanaged.passRetained(box).toOpaque()
++        defer { Unmanaged<TokenBox>.fromOpaque(userData).release() }
++
++        let trampoline: TokenCallback = { tokenPtr, userData, _ in
++            guard let tokenPtr, let userData else { return }
++            let token = String(cString: tokenPtr)
++            Unmanaged<TokenBox>.fromOpaque(userData).takeUnretainedValue().onToken(token)
++        }
++
++        let ptr = paramsJson.withCString { fn(contextId, $0, trampoline, userData) }
++        guard let ptr else { throw Failure.completionFailed("nil result") }
++        defer { free(ptr) }
++        return try decodeJsonDictionary(from: ptr, failure: .completionFailed("invalid JSON"))
++    }
++
+     static func runEmbedding(contextId: Int64, text: String, paramsJson: String) throws -> [String: Any] {
+         let fn   = try sym("llama_run_embedding_json", RunEmbeddingJsonFn.self)
+         let free = try sym("llama_free_completion_result", FreeResultFn.self)
+diff --git a/ios/Sources/LlamaCppCapacitor/LlamaCpp.swift b/ios/Sources/LlamaCppCapacitor/LlamaCpp.swift
+index 3a00aa9..2f6c2cd 100644
+--- a/ios/Sources/LlamaCppCapacitor/LlamaCpp.swift
++++ b/ios/Sources/LlamaCppCapacitor/LlamaCpp.swift
+@@ -213,6 +213,16 @@ struct MinjaCaps {
+     private var nativeContexts: [Int64: UnsafeMutableRawPointer] = [:]
+     private var contextIdToNative: [Int: Int64] = [:]
+     private var contextCounter: Int = 0
++    // PATCH (2026-08-20, local-ai per-token-streaming-ios): set once by
++    // LlamaCppPlugin.load(), so completion(contextId:params:completion:) below can forward
++    // per-token events to the Capacitor bridge. Mirrors Android's `LlamaCpp(Context,
++    // LlamaCppPlugin)` constructor reference (docs/decisions.md's 2026-08-20 Android
++    // streaming-fix entry) but as a closure instead of holding a `LlamaCppPlugin`/`CAPPlugin`
++    // reference directly — more idiomatic Swift, and sidesteps having to import/reference
++    // the plugin type from this file. `nil` (e.g. if LlamaCppPlugin.load() is never called,
++    // such as in a hypothetical unit-test context that constructs LlamaCpp() directly) just
++    // means completion() falls back to the non-streaming path — never a hard failure.
++    var onPartialToken: ((_ contextId: Int, _ token: String) -> Void)?
+     // Default aligned with the isomorphic limit (parity with WASM_MAX_CONCURRENT_MODELS = 5).
+     private var contextLimit: Int = ModelAdmissionController.maxConcurrentModels
+     private var nativeLogEnabled: Bool = false
+@@ -571,9 +581,35 @@ struct MinjaCaps {
+             return
+         }
+ 
+-        DispatchQueue.global(qos: .userInitiated).async {
++        // PATCH (2026-08-20, local-ai per-token-streaming-ios): mirrors the JS wrapper's own
++        // gate (dist/esm/index.js's completion(): `emit_partial_completion: !!callback`) and
++        // Android's identical check (jni.cpp) — only take the streaming native call when a
++        // JS-side listener is actually registered (params carries emit_partial_completion)
++        // AND this instance has been wired with onPartialToken (see LlamaCppPlugin.load()).
++        // NSNumber cast because `params` came in through JSONSerialization/CAPPluginCall as
++        // `[String: Any]` — a JSON `true` bridges to Swift as NSNumber, not Bool, here.
++        let emitPartial = (params["emit_partial_completion"] as? NSNumber)?.boolValue ?? false
++
++        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+             do {
+-                let completionResult = try LlamaNativeBridge.runCompletion(contextId: nativeId, paramsJson: paramsJson)
++                let completionResult: [String: Any]
++                if emitPartial, let onPartialToken = self?.onPartialToken {
++                    do {
++                        completionResult = try LlamaNativeBridge.runCompletionStream(
++                            contextId: nativeId,
++                            paramsJson: paramsJson
++                        ) { token in
++                            onPartialToken(contextId, token)
++                        }
++                    } catch LlamaNativeBridge.Failure.missingSymbol {
++                        // TODO(mac): see runCompletionStream()'s doc comment, point 1 — fails
++                        // closed to today's non-streaming behavior instead of erroring the
++                        // whole completion when the xcframework predates llama_completion_stream.
++                        completionResult = try LlamaNativeBridge.runCompletion(contextId: nativeId, paramsJson: paramsJson)
++                    }
++                } else {
++                    completionResult = try LlamaNativeBridge.runCompletion(contextId: nativeId, paramsJson: paramsJson)
++                }
+                 completion(.success(completionResult))
+             } catch let error as LlamaNativeBridge.Failure {
+                 completion(.failure(.operationFailed(error.localizedDescription)))
+@@ -582,7 +618,7 @@ struct MinjaCaps {
+             }
+         }
+     }
+-    
++
+     func stopCompletion(contextId: Int, completion: @escaping (LlamaResult<Void>) -> Void) {
+         guard contexts[contextId] != nil else {
+             completion(.failure(.contextNotFound))
+diff --git a/ios/Sources/LlamaCppCapacitor/LlamaCppPlugin.swift b/ios/Sources/LlamaCppCapacitor/LlamaCppPlugin.swift
+index 2ef433e..69677b3 100644
+--- a/ios/Sources/LlamaCppCapacitor/LlamaCppPlugin.swift
++++ b/ios/Sources/LlamaCppCapacitor/LlamaCppPlugin.swift
+@@ -83,6 +83,41 @@ public class LlamaCppPlugin: CAPPlugin, CAPBridgedPlugin {
+     
+     private let implementation = LlamaCpp()
+ 
++    // PATCH (2026-08-20, local-ai per-token-streaming-ios): closes docs/decisions.md's "iOS:
++    // notifyListeners unimplemented in llama-cpp-pro's Swift plugin entirely, not just for
++    // tokens" entry (2026-08-20) — confirmed there via `grep -rc notifyListeners
++    // ios/Sources` returning zero across all four Swift files. This is the first
++    // `notifyListeners` call added to this plugin; scoped to `@LlamaCpp_onToken` only
++    // (mirrors Android's fix, which was also token-streaming-scoped, not a general fix for
++    // every event the JS wrapper might expect from native — see that entry's "broader than
++    // the Android gap" framing for events this still doesn't cover).
++    //
++    // TODO(mac):
++    // 1. Confirm `override func load()` is the right lifecycle hook here — mirrors Android's
++    //    `LlamaCppPlugin.load()` (which is where `LlamaCpp(context, plugin)` gets its
++    //    back-reference), but wasn't verified against Capacitor's actual iOS `CAPPlugin`
++    //    lifecycle since there's no Xcode here to build against.
++    // 2. Confirm `notifyListeners(_:data:)`'s exact signature/label on the installed
++    //    Capacitor iOS SDK version — written from general Capacitor-iOS-plugin knowledge,
++    //    not copied from an existing call site in this file (there wasn't one, per the
++    //    zero-occurrences finding above).
++    // 3. `onPartialToken` fires from `LlamaCpp.completion()`'s background dispatch queue,
++    //    not the main thread — confirm `notifyListeners` doesn't need a
++    //    `DispatchQueue.main.async` hop on iOS (Android's `Plugin.notifyListeners()` was
++    //    called directly from the JNI thread with no such hop needed; unconfirmed whether
++    //    iOS's Capacitor bridge has the same tolerance).
++    public override func load() {
++        super.load()
++        implementation.onPartialToken = { [weak self] contextId, token in
++            var tokenResult = JSObject()
++            tokenResult["token"] = token
++            var event = JSObject()
++            event["contextId"] = contextId
++            event["tokenResult"] = tokenResult
++            self?.notifyListeners("@LlamaCpp_onToken", data: event)
++        }
++    }
++
+     // MARK: - Core initialization and management
+     
+     @objc func toggleNativeLog(_ call: CAPPluginCall) {
