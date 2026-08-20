@@ -728,3 +728,38 @@ away and back, then send a message) is still open, tracked in the perf-tuning-pl
 this device, this model, no tuning applied — directly explains the "отвечает очень долго" complaints
 independent of the reasoning-phase/`enable_thinking` issue perf-tuning-plan.md's Фаза 2 targets: even a
 short reply's prefill+generation alone runs into minutes.
+
+### `n_threads` plumbed and device-measured — no throughput win at cap 4 (2026-08-20)
+
+**Context:** perf-tuning plan's Фаза 1 (`forta.chat`'s `docs/plans/llama2/2026-08-20-local-ai-perf-tuning-plan.md`
+§3, `llama2-perf` branch in both repos). `LlmRuntimePort.loadModel()` gained an optional `threads`
+field, `LlamaCppCapacitorAdapter` forwards it to `initLlama()` as `n_threads` only when set,
+`LocalAiConfig.runtimeTuning.threads` wires it through both `local-ai-client.ts` call sites.
+`forta.chat`'s `createLocalAiConfig()` sets it from `navigator.hardwareConcurrency`, capped
+`[2, 4]` (`computeRuntimeThreads()`, `entities/local-ai/lib/create-client.ts`). All four repo-side
+gates green (lint/typecheck/unit/integration/build) before this device pass.
+
+**Device pass, same device/model as the baseline entry above** (P80, Qwen3-4B Q4_K_M) — new empty AI
+chat (not reusing history, to keep prompt length comparable to the baseline's own turn 1), prompt
+"Расскажи короткую историю про кота" (40 tokens after the ChatML-fallback template — native jinja
+failed again this run, same `minja`-class issue as before, unrelated to this phase), same
+`adb logcat` timestamp method:
+
+- `initContext()`'s own logged params confirm the field actually reaches the native call:
+  `{"n_ctx":4096,...,"n_threads":4}` — previously this key was absent entirely.
+- Prefill: 40 tokens / 21.2 s = **1.89 tok/s**. Generation: 315 tokens (natural EOS stop, not a
+  truncation) / 294.9 s = **1.07 tok/s**.
+
+**Finding:** both numbers land inside the baseline's own noise band (1.0–1.1 tok/s generation,
+1.4–1.8 tok/s prefill) — no measurable speedup from setting `n_threads` explicitly to 4.
+`adb shell cat /sys/devices/system/cpu/possible` → `0-7`, so this device actually has 8 cores;
+`forta.chat`'s conservative `min(hardwareConcurrency, 4)` cap (plan §3's deliberately cautious
+starting point, chosen to avoid bigLITTLE efficiency-core/thermal risk without a device to test on)
+never asks for more than 4. Two explanations are equally consistent with one sample and neither is
+confirmed: (a) llama.cpp's own native thread-count default on this device was already ~4, so the
+explicit value changed nothing in practice; (b) single-token CPU decode at this model size/quant is
+memory-bandwidth-bound rather than thread-count-bound past a fairly low core count, so 4→4 (or even
+4→8) wouldn't move tok/s much regardless. Plan §11 open question 1 (the exact threads ceiling) is
+**not resolved** by this pass — the plumbing is verified correct end-to-end, but the specific value
+chosen isn't shown to help yet. Next measurement before touching the cap: rerun the identical method
+with `runtimeTuning.threads: 8` on this same device and compare.
