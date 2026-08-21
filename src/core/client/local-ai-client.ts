@@ -62,6 +62,20 @@ export interface LocalAiConfig {
   maxModelParamsB?: number;
   autoUnloadOnBackground?: boolean;
   /**
+   * Default `false` (multi-model plan §2's original "one model on disk at a
+   * time" — deliberate for storage-constrained devices): `switchModel()`/
+   * `ensureModelReady()`'s internal convergence delete the old model's file
+   * once the new one is verified+loaded. Set `true` to keep every
+   * downloaded model's file on disk across a switch — lets a consumer offer
+   * an instant "switch back" between models the user has already
+   * downloaded, at the cost of that much extra storage per resident model
+   * (docs/plans/llama2/2026-08-21-multi-model-selection-plan.md's
+   * multi-model-resident follow-up, 2026-08-21). Embedding switches are
+   * unaffected either way — `switchEmbedding()` always deletes the old
+   * embedding file, embeddings aren't part of this trade-off.
+   */
+  retainInactiveModels?: boolean;
+  /**
    * `'no'` default `'block'`: `ensureReady()` throws `DeviceNotEligibleError`.
    * `'tight'`/`'unknown'` default `'warn'`: emits `device:eligibility-warning`
    * and continues. `'ignore'` skips the check entirely inside `ensureReady()`
@@ -499,18 +513,35 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
    * resuming the download — for a consumer that wants to show "resume from
    * X%" before the user taps download, rather than only finding out once
    * `ensureModelReady()` is already moving (its own `onProgress` has no way
-   * to report a starting-point ahead of the first real network chunk).
-   * Resolves `null` if there's no cached manifest yet (nothing to size the
-   * percentage against) or no partial file at all — a fresh device and a
-   * fully-downloaded device look the same here; check
-   * `LocalAiClient`'s own readiness state to tell those apart.
+   * to report a starting-point ahead of the first real network chunk). With
+   * `config.retainInactiveModels` this also doubles as "is this specific
+   * *inactive* model already fully downloaded" (percent === 100), letting a
+   * model-picker UI distinguish "switch" (already resident, fast) from
+   * "download" (multi-model plan's follow-up, 2026-08-21) for a model that
+   * isn't the current selection. Resolves `null` if there's no cached
+   * manifest yet (nothing to size the percentage against), `modelId` isn't
+   * a model in it, or no partial file at all — a fresh device and a
+   * fully-downloaded device look the same here; check `LocalAiClient`'s own
+   * readiness state (or `percent === 100`) to tell those apart.
    * @param target Which artifact to check — defaults to `'model'`.
+   * @param modelId `target: 'model'` only — which model to check; defaults
+   *   to the resolved selected model. Ignored for `target: 'embedding'`
+   *   (always checks the selected model's compatible embedding — embeddings
+   *   aren't independently selectable).
    */
-  async getDownloadProgress(target: 'model' | 'embedding' = 'model'): Promise<PartialDownloadProgress | null> {
+  async getDownloadProgress(target: 'model' | 'embedding' = 'model', modelId?: string): Promise<PartialDownloadProgress | null> {
     const manifest = this.currentManifest ?? (await this.manifestService.getCachedManifest());
     if (!manifest) return null;
-    const selectedModel = this.resolveSelectedModel(manifest);
-    const artifact = target === 'embedding' ? this.resolveEmbeddingForModel(manifest, selectedModel.id) : selectedModel;
+    let artifact: { filename: string; sizeBytes: number };
+    if (target === 'embedding') {
+      artifact = this.resolveEmbeddingForModel(manifest, this.resolveSelectedModel(manifest).id);
+    } else if (modelId) {
+      const found = manifest.models.find((m) => m.id === modelId);
+      if (!found) return null;
+      artifact = found;
+    } else {
+      artifact = this.resolveSelectedModel(manifest);
+    }
     const path = this.ports.fileSystem.resolvePath(target === 'embedding' ? 'embeddings' : 'models', artifact.filename);
     const stat = await this.ports.fileSystem.stat(path);
     if (!stat || stat.sizeBytes <= 0) return null;
@@ -550,30 +581,54 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
   }
 
   /**
-   * Deletes the model entirely: stops any in-flight/paused transfer,
-   * deletes the (partial or complete) file on disk, clears its persisted
-   * `download_state` row, releases the loaded LLM context if this was the
-   * active model, and demotes the registry's "current" model row. Leaves
-   * the manifest/eligibility state untouched — a later `ensureModelReady()`
-   * call downloads it again from scratch, same as a fresh device. Safe to
-   * call with nothing downloaded (no-op beyond the already-idempotent
-   * runtime/registry cleanup).
+   * Deletes a model entirely: stops any in-flight/paused transfer, deletes
+   * the (partial or complete) file on disk, clears its persisted
+   * `download_state` row, and — only if `modelId` names whichever model is
+   * actually loaded right now (or no `modelId` is given at all, matching
+   * this method's original single-model contract) — releases the LLM
+   * context and demotes the registry's "current" model row. Deleting a
+   * *different*, merely-resident model (multi-model plan's
+   * `retainInactiveModels` follow-up, 2026-08-21) never touches the
+   * runtime — it isn't loaded, there's nothing to release. Leaves the
+   * manifest/eligibility state untouched — a later `ensureModelReady()`/
+   * `selectModel()` call for the same id downloads it again from scratch,
+   * same as a fresh device. Safe to call with nothing downloaded (no-op
+   * beyond the already-idempotent runtime/registry cleanup).
+   * @param modelId Which model to delete — defaults to the resolved
+   *   selected model (backward-compatible with the original no-arg
+   *   contract). Must still be present in the current manifest; deleting a
+   *   file left behind by a since-removed/deprecated model isn't supported.
    */
-  async deleteModel(): Promise<void> {
+  async deleteModel(modelId?: string): Promise<void> {
     const manifest = this.currentManifest ?? (await this.manifestService.getCachedManifest());
-    if (manifest) {
-      const artifact = this.resolveSelectedModel(manifest);
+    const artifact = modelId
+      ? manifest?.models.find((m) => m.id === modelId)
+      : manifest
+        ? this.resolveSelectedModel(manifest)
+        : undefined;
+    if (artifact) {
       const key = this.downloadEngine.keyFor(resolveArtifactUrl(artifact), artifact.filename);
       const destinationPath = this.ports.fileSystem.resolvePath('models', artifact.filename);
       await this.downloadEngine.cancel(key, destinationPath, { discardPartial: true });
     }
-    if (this.modelLoaded) {
-      await this.ports.llmRuntime.releaseModel();
-      this.modelLoaded = false;
-      this.loadedModelArtifact = null;
-      await this.emit('runtime:unloaded', { reason: 'model-deleted' });
+    // No modelId at all -> original contract: release/demote whatever's
+    // current unconditionally. A modelId given -> only if it's the
+    // registry's *current* model (durable truth, not just this session's
+    // in-memory loadedModelArtifact — a model can be fully on disk and
+    // registered as current from a previous session before this one ever
+    // calls ensureModelReady()) — deleting a different, merely-resident
+    // model must not tear down a still-valid current-model record.
+    const currentRegistryRow = await this.modelRegistry.getCurrent('model');
+    const deletingCurrentModel = !modelId || currentRegistryRow?.id === modelId;
+    if (deletingCurrentModel) {
+      if (this.modelLoaded) {
+        await this.ports.llmRuntime.releaseModel();
+        this.modelLoaded = false;
+        this.loadedModelArtifact = null;
+        await this.emit('runtime:unloaded', { reason: 'model-deleted' });
+      }
+      await this.modelRegistry.clearCurrent('model');
     }
-    await this.modelRegistry.clearCurrent('model');
   }
 
   /** TZ §6.3 — clears every locally-cached `LocalRuntimeVerdict` (`'tooSlow'`/`'oom'`), e.g. after the user frees device memory. */
@@ -898,8 +953,11 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
       sizeBytes: artifact.sizeBytes,
     }); // step 4
 
-    if (previous && previous.filename !== artifact.filename) {
-      // step 5 — old file, never the one we just downloaded
+    // step 5 — old file, never the one we just downloaded. Skipped when
+    // config.retainInactiveModels keeps every downloaded model resident
+    // (multi-model plan's follow-up, 2026-08-21) — the old model stays on
+    // disk so switching back to it later needs no re-download.
+    if (!this.config.retainInactiveModels && previous && previous.filename !== artifact.filename) {
       await this.ports.fileSystem.deleteFile(this.ports.fileSystem.resolvePath('models', previous.filename)).catch(() => undefined);
     }
 

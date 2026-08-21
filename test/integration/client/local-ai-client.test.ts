@@ -1433,5 +1433,94 @@ describe('LocalAiClient', () => {
       const second = await LocalAiClient.create({ manifestUrl, ports });
       expect(second.getSelectedModelId()).toBe('small-model');
     });
+
+    // config.retainInactiveModels — 2026-08-21 follow-up: let a consumer
+    // keep every downloaded model resident for an instant "switch back",
+    // trading storage for speed.
+    describe('retainInactiveModels', () => {
+      it('switchModel() keeps the old model file on disk instead of deleting it', async () => {
+        const client = await LocalAiClient.create({ manifestUrl, ports, retainInactiveModels: true });
+        stubManifest(twoModelManifestBody());
+        await client.refreshManifest();
+        await client.ensureModelReady(); // loads the recommended qwen-4b
+        expect(fs.existsSync(path.join(tmpDir, 'models', 'model.gguf'))).toBe(true);
+
+        await client.selectModel('small-model');
+        await client.switchModel();
+
+        expect(fs.existsSync(path.join(tmpDir, 'models', 'model.gguf'))).toBe(true); // old file KEPT, not deleted
+        expect(fs.existsSync(path.join(tmpDir, 'models', 'small-model.gguf'))).toBe(true);
+        expect(llmRuntime.modelLoaded).toBe(true);
+      });
+
+      it('without the flag (default), switchModel() still deletes the old file', async () => {
+        const client = await LocalAiClient.create({ manifestUrl, ports }); // retainInactiveModels omitted -> false
+        stubManifest(twoModelManifestBody());
+        await client.refreshManifest();
+        await client.ensureModelReady();
+        await client.selectModel('small-model');
+
+        await client.switchModel();
+
+        expect(fs.existsSync(path.join(tmpDir, 'models', 'model.gguf'))).toBe(false);
+        expect(fs.existsSync(path.join(tmpDir, 'models', 'small-model.gguf'))).toBe(true);
+      });
+
+      it('getDownloadProgress("model", modelId) reports 100% for an inactive but resident model', async () => {
+        const client = await LocalAiClient.create({ manifestUrl, ports, retainInactiveModels: true });
+        stubManifest(twoModelManifestBody());
+        await client.refreshManifest();
+        await client.ensureModelReady(); // qwen-4b active
+        await client.selectModel('small-model');
+        await client.switchModel(); // small-model now active, qwen-4b stays resident
+
+        const progress = await client.getDownloadProgress('model', 'qwen-4b');
+
+        expect(progress?.percent).toBe(100);
+      });
+
+      it('getDownloadProgress("model", modelId) resolves null for a model that was never downloaded', async () => {
+        const client = await LocalAiClient.create({ manifestUrl, ports });
+        stubManifest(twoModelManifestBody());
+        await client.refreshManifest();
+
+        const progress = await client.getDownloadProgress('model', 'small-model');
+
+        expect(progress).toBeNull();
+      });
+
+      it('deleteModel(modelId) removes a specific inactive resident model without touching the active runtime', async () => {
+        const client = await LocalAiClient.create({ manifestUrl, ports, retainInactiveModels: true });
+        stubManifest(twoModelManifestBody());
+        await client.refreshManifest();
+        await client.ensureModelReady(); // qwen-4b active
+        await client.selectModel('small-model');
+        await client.switchModel(); // small-model now active, qwen-4b resident
+
+        let unloadedFired = false;
+        client.on('runtime:unloaded', () => {
+          unloadedFired = true;
+        });
+
+        await client.deleteModel('qwen-4b');
+
+        expect(fs.existsSync(path.join(tmpDir, 'models', 'model.gguf'))).toBe(false);
+        expect(fs.existsSync(path.join(tmpDir, 'models', 'small-model.gguf'))).toBe(true); // untouched
+        expect(llmRuntime.modelLoaded).toBe(true); // active model's runtime context untouched
+        expect(unloadedFired).toBe(false);
+      });
+
+      it('deleteModel(modelId) for the currently loaded model releases the runtime', async () => {
+        const client = await LocalAiClient.create({ manifestUrl, ports, retainInactiveModels: true });
+        stubManifest(twoModelManifestBody());
+        await client.refreshManifest();
+        await client.ensureModelReady(); // qwen-4b active
+
+        await client.deleteModel('qwen-4b');
+
+        expect(fs.existsSync(path.join(tmpDir, 'models', 'model.gguf'))).toBe(false);
+        expect(llmRuntime.modelLoaded).toBe(false);
+      });
+    });
   });
 });
