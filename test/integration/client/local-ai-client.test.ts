@@ -24,50 +24,59 @@ import {
   RuntimeInitError,
 } from '../../../src/core/errors.js';
 import type { DeviceSnapshot } from '../../../src/core/support/types.js';
+import type { EmbeddingArtifact, ModelArtifact } from '../../../src/core/manifest/manifest.schema.js';
 
 const realFetch = globalThis.fetch;
 const hash = new WebCryptoHashAdapter();
 const MODEL_BYTES = Buffer.from('fake-model-weights-content');
 
-function manifestBody() {
+// Explicit return type — see manifest.service.test.ts's validManifestBody()
+// doc comment for why (lets the multi-model tests .push() a second,
+// differently-shaped-but-compatible model/embedding).
+function manifestBody(): { manifestVersion: number; publishedAt: string; models: ModelArtifact[]; embeddings: EmbeddingArtifact[] } {
   return {
     manifestVersion: 1,
     publishedAt: '2026-01-01T00:00:00.000Z',
-    model: {
-      id: 'qwen-4b',
-      version: 1,
-      displayName: 'Qwen 4B',
-      family: 'qwen',
-      paramsB: 4,
-      quant: 'Q4_K_M',
-      languages: 'multilingual',
-      contextLength: 2048,
-      source: { type: 'huggingface', repo: 'org/qwen', revision: 'abc123def456', file: 'model.gguf' },
-      filename: 'model.gguf',
-      sha256: hash.sha256(MODEL_BYTES),
-      sizeBytes: MODEL_BYTES.length,
-      minRamGb: 4,
-      recommendedRamGb: 8,
-      chatTemplate: 'auto' as const,
-      status: 'active' as const,
-    },
-    embedding: {
-      id: 'bge-small',
-      version: 1,
-      compatibleModelIds: ['qwen-4b'],
-      dimensions: 4,
-      source: { type: 'url', url: 'https://example.com/embedding.gguf' },
-      filename: 'embedding.gguf',
-      // Both "model" and "embedding" downloads route to the same mock
-      // server/content in this test (see the fetch stub below) — the sha256
-      // here must match what's actually served (MODEL_BYTES), not a
-      // separate EMBEDDING_BYTES that's never served.
-      sha256: hash.sha256(MODEL_BYTES),
-      sizeBytes: MODEL_BYTES.length,
-      minRamGb: 1,
-      recommendedRamGb: 2,
-      status: 'active' as const,
-    },
+    models: [
+      {
+        id: 'qwen-4b',
+        version: 1,
+        displayName: 'Qwen 4B',
+        family: 'qwen',
+        paramsB: 4,
+        quant: 'Q4_K_M',
+        languages: 'multilingual',
+        contextLength: 2048,
+        source: { type: 'huggingface', repo: 'org/qwen', revision: 'abc123def456', file: 'model.gguf' },
+        filename: 'model.gguf',
+        sha256: hash.sha256(MODEL_BYTES),
+        sizeBytes: MODEL_BYTES.length,
+        minRamGb: 4,
+        recommendedRamGb: 8,
+        chatTemplate: 'auto' as const,
+        status: 'active' as const,
+        recommended: true,
+      },
+    ],
+    embeddings: [
+      {
+        id: 'bge-small',
+        version: 1,
+        compatibleModelIds: ['qwen-4b'],
+        dimensions: 4,
+        source: { type: 'url', url: 'https://example.com/embedding.gguf' },
+        filename: 'embedding.gguf',
+        // Both "model" and "embedding" downloads route to the same mock
+        // server/content in this test (see the fetch stub below) — the sha256
+        // here must match what's actually served (MODEL_BYTES), not a
+        // separate EMBEDDING_BYTES that's never served.
+        sha256: hash.sha256(MODEL_BYTES),
+        sizeBytes: MODEL_BYTES.length,
+        minRamGb: 1,
+        recommendedRamGb: 2,
+        status: 'active' as const,
+      },
+    ],
   };
 }
 
@@ -91,7 +100,7 @@ describe('LocalAiClient', () => {
 
   /**
    * Re-stubs `fetch` to serve `body` for `manifestUrl` and route any
-   * huggingface.co/`body.embedding.source.url` request to `defaultRouteUrl`
+   * huggingface.co/`body.embeddings[0].source.url` request to `defaultRouteUrl`
    * (the always-on `modelServer` by default), with per-URL overrides for
    * tests that need the model/embedding to resolve to *different* mock
    * servers (e.g. `switchModel()`'s "new version, different bytes").
@@ -106,7 +115,7 @@ describe('LocalAiClient', () => {
         if (url in routeOverrides) {
           return realFetch(routeOverrides[url]!, init);
         }
-        if (url.includes('huggingface.co') || url === body.embedding.source.url) {
+        if (url.includes('huggingface.co') || url === body.embeddings[0]!.source.url) {
           return realFetch(modelUrl, init);
         }
         throw new Error(`unexpected fetch: ${url}`);
@@ -560,8 +569,8 @@ describe('LocalAiClient', () => {
       const bigUrl = await bigServer.listen();
 
       const body = manifestBody();
-      body.model.sha256 = hash.sha256(bigBytes);
-      body.model.sizeBytes = bigBytes.length;
+      body.models[0]!.sha256 = hash.sha256(bigBytes);
+      body.models[0]!.sizeBytes = bigBytes.length;
       stubManifest(body, { 'https://huggingface.co/org/qwen/resolve/abc123def456/model.gguf': bigUrl });
 
       const client = await LocalAiClient.create({ manifestUrl, ports });
@@ -675,7 +684,7 @@ describe('LocalAiClient', () => {
     await client.refreshManifest(); // caches a valid manifest first
 
     const invalidBody = manifestBody();
-    invalidBody.model.source.revision = 'main';
+    invalidBody.models[0]!.source.revision = 'main';
     stubManifest(invalidBody);
 
     let invalidEventFired = false;
@@ -792,10 +801,10 @@ describe('LocalAiClient', () => {
     const newModelUrl = await newModelServer.listen();
 
     const v2Body = manifestBody();
-    v2Body.model.version = 2;
-    v2Body.model.filename = 'model-v2.gguf';
-    v2Body.model.sha256 = hash.sha256(NEW_MODEL_BYTES);
-    v2Body.model.sizeBytes = NEW_MODEL_BYTES.length;
+    v2Body.models[0]!.version = 2;
+    v2Body.models[0]!.filename = 'model-v2.gguf';
+    v2Body.models[0]!.sha256 = hash.sha256(NEW_MODEL_BYTES);
+    v2Body.models[0]!.sizeBytes = NEW_MODEL_BYTES.length;
     stubManifest(v2Body, { 'https://huggingface.co/org/qwen/resolve/abc123def456/model.gguf': newModelUrl });
 
     await client.refreshManifest();
@@ -826,11 +835,11 @@ describe('LocalAiClient', () => {
     const newEmbeddingUrl = await newEmbeddingServer.listen();
 
     const v2Body = manifestBody();
-    v2Body.embedding.version = 2;
-    v2Body.embedding.filename = 'embedding-v2.gguf';
-    v2Body.embedding.dimensions = 8; // was 4
-    v2Body.embedding.sha256 = hash.sha256(NEW_EMBEDDING_BYTES);
-    v2Body.embedding.sizeBytes = NEW_EMBEDDING_BYTES.length;
+    v2Body.embeddings[0]!.version = 2;
+    v2Body.embeddings[0]!.filename = 'embedding-v2.gguf';
+    v2Body.embeddings[0]!.dimensions = 8; // was 4
+    v2Body.embeddings[0]!.sha256 = hash.sha256(NEW_EMBEDDING_BYTES);
+    v2Body.embeddings[0]!.sizeBytes = NEW_EMBEDDING_BYTES.length;
     stubManifest(v2Body, { 'https://example.com/embedding.gguf': newEmbeddingUrl });
 
     await client.refreshManifest();
@@ -1105,7 +1114,7 @@ describe('LocalAiClient', () => {
 
   it('ensureModelReady() emits download:failed on a checksum mismatch (previously declared but never emitted, LOG.3)', async () => {
     const v2Body = manifestBody();
-    v2Body.model.sha256 = 'a'.repeat(64); // deliberately wrong — never matches MODEL_BYTES' real hash
+    v2Body.models[0]!.sha256 = 'a'.repeat(64); // deliberately wrong — never matches MODEL_BYTES' real hash
     stubManifest(v2Body);
     const client = await LocalAiClient.create({ manifestUrl, ports });
     await client.refreshManifest();
@@ -1166,7 +1175,7 @@ describe('LocalAiClient', () => {
     await client.refreshManifest(); // manifest:updated -> info, caches a valid manifest first
 
     const invalidBody = manifestBody();
-    invalidBody.model.source.revision = 'main';
+    invalidBody.models[0]!.source.revision = 'main';
     stubManifest(invalidBody);
     await client.refreshManifest(); // fails validation -> emits manifest:invalid -> error, meets minLevel: 'error'
 
@@ -1209,7 +1218,7 @@ describe('LocalAiClient', () => {
     clock.advance(1000);
     await client.createChat(); // chat:created is debug (filtered by minLevel), so trigger another info-level event
     const invalidBody = manifestBody();
-    invalidBody.model.source.revision = 'main';
+    invalidBody.models[0]!.source.revision = 'main';
     stubManifest(invalidBody);
     await client.refreshManifest(); // manifest:invalid, after the cutoff
 
@@ -1251,5 +1260,178 @@ describe('LocalAiClient', () => {
     expect(sawEvent).toBe(true);
     expect(llmRuntime.modelLoaded).toBe(false);
     await expect(ports.sqlite.query('SELECT 1')).rejects.toBeDefined();
+  });
+
+  // --- Multi-model selection — docs/plans/llama2/2026-08-21-multi-model-selection-plan.md §6/§7 ---
+  // The second model shares MODEL_BYTES' content/sha256 (served by the
+  // same always-on modelServer, routed via the huggingface.co branch of
+  // stubManifest()'s fetch stub) — no second mock server needed since only
+  // artifact *identity* (id/filename/paramsB/minRamGb), not byte content,
+  // is what these tests care about.
+  describe('multi-model selection', () => {
+    function secondModel() {
+      return {
+        id: 'small-model',
+        version: 1,
+        displayName: 'Small Model',
+        family: 'qwen',
+        paramsB: 1.5,
+        quant: 'Q4_K_M',
+        languages: 'multilingual' as const,
+        contextLength: 2048,
+        source: { type: 'huggingface' as const, repo: 'org/small', revision: 'def456abc789', file: 'small.gguf' },
+        filename: 'small-model.gguf',
+        sha256: hash.sha256(MODEL_BYTES),
+        sizeBytes: MODEL_BYTES.length,
+        minRamGb: 2,
+        recommendedRamGb: 2,
+        chatTemplate: 'auto' as const,
+        status: 'active' as const,
+      };
+    }
+
+    function twoModelManifestBody() {
+      const body = manifestBody();
+      body.models.push(secondModel());
+      body.embeddings[0]!.compatibleModelIds = ['qwen-4b', 'small-model'];
+      return body;
+    }
+
+    it('selectModel() persists the choice and emits model:selected without downloading or loading anything', async () => {
+      const client = await LocalAiClient.create({ manifestUrl, ports });
+      stubManifest(twoModelManifestBody());
+      await client.refreshManifest();
+
+      let selectedEvent: { modelId: string } | undefined;
+      client.on('model:selected', (e) => {
+        selectedEvent = e;
+      });
+
+      await client.selectModel('small-model');
+
+      expect(selectedEvent).toEqual({ modelId: 'small-model' });
+      expect(client.getSelectedModelId()).toBe('small-model');
+      expect(llmRuntime.modelLoaded).toBe(false);
+      expect(fs.existsSync(path.join(tmpDir, 'models', 'small-model.gguf'))).toBe(false);
+    });
+
+    it('selectModel() throws ConfigInvalidError for an id not in the manifest', async () => {
+      const client = await LocalAiClient.create({ manifestUrl, ports });
+      stubManifest(twoModelManifestBody());
+      await client.refreshManifest();
+      await expect(client.selectModel('does-not-exist')).rejects.toThrow(ConfigInvalidError);
+    });
+
+    it('selectModel() throws ConfigInvalidError for a deprecated model', async () => {
+      const client = await LocalAiClient.create({ manifestUrl, ports });
+      const body = twoModelManifestBody();
+      body.models[1]!.status = 'deprecated';
+      stubManifest(body);
+      await client.refreshManifest();
+      await expect(client.selectModel('small-model')).rejects.toThrow(ConfigInvalidError);
+    });
+
+    it('ensureModelReady() with no explicit selection loads the recommended model', async () => {
+      const client = await LocalAiClient.create({ manifestUrl, ports });
+      stubManifest(twoModelManifestBody());
+      await client.refreshManifest();
+
+      await client.ensureModelReady();
+
+      expect(fs.existsSync(path.join(tmpDir, 'models', 'model.gguf'))).toBe(true); // qwen-4b, recommended: true
+      expect(fs.existsSync(path.join(tmpDir, 'models', 'small-model.gguf'))).toBe(false);
+    });
+
+    it('ensureModelReady() after selectModel() loads the selected model, not the recommended default', async () => {
+      const client = await LocalAiClient.create({ manifestUrl, ports });
+      stubManifest(twoModelManifestBody());
+      await client.refreshManifest();
+      await client.selectModel('small-model');
+
+      await client.ensureModelReady();
+
+      expect(fs.existsSync(path.join(tmpDir, 'models', 'small-model.gguf'))).toBe(true);
+      expect(fs.existsSync(path.join(tmpDir, 'models', 'model.gguf'))).toBe(false);
+    });
+
+    it('ensureModelReady() converges to a new selection made after a model is already loaded — deletes the old file and invalidates sessions', async () => {
+      const client = await LocalAiClient.create({ manifestUrl, ports });
+      stubManifest(twoModelManifestBody());
+      await client.refreshManifest();
+      await client.ensureModelReady(); // loads the recommended qwen-4b
+      expect(fs.existsSync(path.join(tmpDir, 'models', 'model.gguf'))).toBe(true);
+
+      await client.selectModel('small-model');
+
+      let unloadedReason: string | undefined;
+      client.on('runtime:unloaded', (e) => {
+        unloadedReason = e.reason;
+      });
+
+      await client.ensureModelReady(); // no follow-up switchModel() call — ensureModelReady() alone must converge
+
+      expect(unloadedReason).toBe('model-switch');
+      expect(fs.existsSync(path.join(tmpDir, 'models', 'model.gguf'))).toBe(false); // old file cleaned up
+      expect(fs.existsSync(path.join(tmpDir, 'models', 'small-model.gguf'))).toBe(true);
+      expect(llmRuntime.modelLoaded).toBe(true);
+    });
+
+    it('switchModel() with no argument targets whatever is currently selected', async () => {
+      const client = await LocalAiClient.create({ manifestUrl, ports });
+      stubManifest(twoModelManifestBody());
+      await client.refreshManifest();
+      await client.selectModel('small-model');
+
+      await client.switchModel();
+
+      expect(fs.existsSync(path.join(tmpDir, 'models', 'small-model.gguf'))).toBe(true);
+      expect(llmRuntime.modelLoaded).toBe(true);
+    });
+
+    it('checkDeviceEligibility("model", modelId) evaluates a specific model without mutating selectedModelId', async () => {
+      const client = await LocalAiClient.create({ manifestUrl, ports });
+      stubManifest(twoModelManifestBody());
+      await client.refreshManifest();
+
+      // Below qwen-4b's minRamGb (4) but above small-model's (2).
+      deviceInfo.set({ totalRamGb: 3, freeRamGb: 2.5, freeDiskBytes: 10_000_000_000, thermal: 'nominal', lowPowerMode: false });
+
+      const bigReport = await client.checkDeviceEligibility('model', 'qwen-4b');
+      const smallReport = await client.checkDeviceEligibility('model', 'small-model');
+
+      expect(bigReport.verdict).toBe('no');
+      expect(smallReport.verdict).toBe('ok');
+      expect(client.getSelectedModelId()).toBeNull(); // readonly check — never selected anything
+    });
+
+    it('checkDeviceEligibility("embedding", modelId) resolves that model\'s compatible embedding', async () => {
+      const client = await LocalAiClient.create({ manifestUrl, ports });
+      stubManifest(twoModelManifestBody());
+      await client.refreshManifest();
+
+      const report = await client.checkDeviceEligibility('embedding', 'small-model');
+      expect(report.verdict).toBe('ok'); // the shared embedding easily fits goodDevice
+    });
+
+    it('checkDeviceEligibility("model") with an unknown modelId resolves "unknown" rather than throwing', async () => {
+      const client = await LocalAiClient.create({ manifestUrl, ports });
+      stubManifest(twoModelManifestBody());
+      await client.refreshManifest();
+
+      const report = await client.checkDeviceEligibility('model', 'does-not-exist');
+      expect(report.verdict).toBe('unknown');
+    });
+
+    it('the selected model survives a process restart (persisted in kv_store, not just in-memory)', async () => {
+      const first = await LocalAiClient.create({ manifestUrl, ports });
+      stubManifest(twoModelManifestBody());
+      await first.refreshManifest();
+      await first.selectModel('small-model');
+
+      // Same `ports.sqlite` (same in-memory DB) — a fresh LocalAiClient
+      // simulates a process restart reading back kv_store's persisted state.
+      const second = await LocalAiClient.create({ manifestUrl, ports });
+      expect(second.getSelectedModelId()).toBe('small-model');
+    });
   });
 });

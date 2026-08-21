@@ -10,7 +10,7 @@ export * from './errors.js';
 export * from './types.js';
 
 export type { LocalAiManifest, ModelArtifact, EmbeddingArtifact, HuggingFaceSource, UrlSource } from './manifest/manifest.schema.js';
-export type { ManifestDiff } from './manifest/manifest.diff.js';
+export type { ManifestDiff, ArtifactDiffEntry } from './manifest/manifest.diff.js';
 
 export type {
   Capability,

@@ -37,38 +37,60 @@ const embedding: EmbeddingArtifact = {
 
 describe('diffManifest', () => {
   it('reports both changed when nothing is installed yet (first run)', () => {
-    const diff = diffManifest({ model, embedding }, {});
+    const diff = diffManifest({ models: [model], embeddings: [embedding] }, {});
     expect(diff.modelChanged).toBe(true);
     expect(diff.embeddingChanged).toBe(true);
-    expect(diff.model.from).toBeUndefined();
-    expect(diff.embedding.from).toBeUndefined();
+    expect(diff.models[0]?.from).toBeUndefined();
+    expect(diff.embeddings[0]?.from).toBeUndefined();
   });
 
   it('reports neither changed when installed matches next exactly', () => {
-    const diff = diffManifest({ model, embedding }, { model, embedding });
+    const diff = diffManifest({ models: [model], embeddings: [embedding] }, { models: [model], embeddings: [embedding] });
     expect(diff.modelChanged).toBe(false);
     expect(diff.embeddingChanged).toBe(false);
   });
 
   it('reports only modelChanged on a model version bump, independent of embedding', () => {
     const nextModel = { ...model, version: 2 };
-    const diff = diffManifest({ model: nextModel, embedding }, { model, embedding });
+    const diff = diffManifest({ models: [nextModel], embeddings: [embedding] }, { models: [model], embeddings: [embedding] });
     expect(diff.modelChanged).toBe(true);
     expect(diff.embeddingChanged).toBe(false);
-    expect(diff.model.from).toEqual(model);
-    expect(diff.model.to).toEqual(nextModel);
+    expect(diff.models[0]?.from).toEqual(model);
+    expect(diff.models[0]?.to).toEqual(nextModel);
   });
 
   it('reports only embeddingChanged on an embedding version bump, independent of model', () => {
     const nextEmbedding = { ...embedding, version: 2 };
-    const diff = diffManifest({ model, embedding: nextEmbedding }, { model, embedding });
+    const diff = diffManifest({ models: [model], embeddings: [nextEmbedding] }, { models: [model], embeddings: [embedding] });
     expect(diff.modelChanged).toBe(false);
     expect(diff.embeddingChanged).toBe(true);
   });
 
   it('treats a same-version different-id swap as changed', () => {
     const nextModel = { ...model, id: 'llama-4b' };
-    const diff = diffManifest({ model: nextModel, embedding }, { model, embedding });
+    const diff = diffManifest({ models: [nextModel], embeddings: [embedding] }, { models: [model], embeddings: [embedding] });
     expect(diff.modelChanged).toBe(true);
+  });
+
+  it('reports a model missing from next as changed with to: undefined', () => {
+    const diff = diffManifest({ models: [], embeddings: [embedding] }, { models: [model], embeddings: [embedding] });
+    expect(diff.modelChanged).toBe(true);
+    expect(diff.models[0]?.id).toBe(model.id);
+    expect(diff.models[0]?.to).toBeUndefined();
+    expect(diff.models[0]?.from).toEqual(model);
+  });
+
+  it('reports two models independently, one changed one not', () => {
+    const model2 = { ...model, id: 'small-model' };
+    const model2v2 = { ...model2, version: 2 };
+    const diff = diffManifest(
+      { models: [model, model2v2], embeddings: [embedding] },
+      { models: [model, model2], embeddings: [embedding] },
+    );
+    expect(diff.modelChanged).toBe(true);
+    const first = diff.models.find((m) => m.id === model.id);
+    const second = diff.models.find((m) => m.id === model2.id);
+    expect(first?.changed).toBe(false);
+    expect(second?.changed).toBe(true);
   });
 });

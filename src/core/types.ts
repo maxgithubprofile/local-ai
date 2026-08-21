@@ -80,6 +80,8 @@ export interface CompletionStream<TResult> extends AsyncIterable<CompletionToken
 export interface LocalAiEventMap {
   'manifest:updated': ManifestDiff;
   'manifest:invalid': { error: Error };
+  /** Fires when `LocalAiClient.selectModel()` persists a new choice — never implies a download/load started, see `selectModel()`'s doc comment (multi-model plan §6 п.2). */
+  'model:selected': { modelId: string };
   'device:eligibility-warning': EligibilityReport;
   'download:progress': DownloadProgress;
   'download:completed': { key: string; kind: 'model' | 'embedding' };

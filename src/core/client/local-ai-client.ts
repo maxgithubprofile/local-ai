@@ -51,7 +51,7 @@ import type {
 } from '../conversations/conversation.types.js';
 import type { VectorEntry, VectorSearchHit, VectorSpaceDescriptor, VectorStore } from '../db/vector-store.js';
 import { createVectorStore } from '../db/create-vector-store.js';
-import type { LocalAiManifest } from '../manifest/manifest.schema.js';
+import type { EmbeddingArtifact, LocalAiManifest, ModelArtifact } from '../manifest/manifest.schema.js';
 import { AsyncTokenQueue } from '../utils/async-token-queue.js';
 
 /** Constructor options for {@link LocalAiClient.create} — TZ §10. */
@@ -135,6 +135,15 @@ export interface LocalAiLogger {
 
 const NOT_IMPLEMENTED = 'not implemented — see ROADMAP.md for the owning phase';
 
+/**
+ * `kv_store` key for the persisted user model choice — multi-model plan §6
+ * п.1. Deliberately a `LocalAiClient`-level key, not `ManifestService`'s
+ * (`manifest:cached`/`manifest:etag`): the selection must survive a
+ * manifest refresh untouched, not be tied to whichever manifest happened
+ * to be cached when the user picked it.
+ */
+const KV_KEY_SELECTED_MODEL = 'client:selectedModelId';
+
 const REQUIRED_PORT_KEYS: Array<keyof LocalAiPorts> = [
   'platformSupport',
   'deviceInfo',
@@ -171,6 +180,7 @@ function rejectedCompletionStream<T>(error: Error): CompletionStream<T> {
 const EVENT_LOG_LEVEL: { [E in keyof LocalAiEventMap]: LogLevel } = {
   'manifest:updated': 'info',
   'manifest:invalid': 'error',
+  'model:selected': 'info',
   'device:eligibility-warning': 'warn',
   'download:progress': 'debug',
   'download:completed': 'info',
@@ -208,7 +218,13 @@ function sanitizeLogMeta(payload: unknown): Record<string, unknown> | undefined 
 export class LocalAiClient implements ConversationApi, ConversationSyncApi, ChatSearchApi, ChatExportApi, LogExportApi {
   private currentManifest: LocalAiManifest | null = null;
   private modelLoaded = false;
+  /** The exact model artifact currently loaded in the native runtime — may differ from `resolveSelectedModel()`'s result if `selectModel()` was called without a follow-up `ensureModelReady()`/`switchModel()` yet. `null` whenever `modelLoaded` is `false`. */
+  private loadedModelArtifact: ModelArtifact | null = null;
   private embeddingLoaded = false;
+  /** Same idea as {@link loadedModelArtifact}, for the embedding side. */
+  private loadedEmbeddingArtifact: EmbeddingArtifact | null = null;
+  /** In-memory cache of `kv_store`'s `KV_KEY_SELECTED_MODEL`, warmed once in `create()` and kept in sync by `selectModel()` — lets `resolveSelectedModel()`/`activeVectorSpace()` stay synchronous instead of re-querying sqlite on every call. */
+  private selectedModelId: string | null = null;
   private vectorStore: VectorStore | null = null;
   private messageSearchIndex: MessageSearchIndex | null = null;
   private readonly listeners = new Map<keyof LocalAiEventMap, Set<(payload: never) => void>>();
@@ -276,6 +292,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
       logStore,
     );
     client.currentManifest = await manifestService.getCachedManifest();
+    client.selectedModelId = await client.getKv(KV_KEY_SELECTED_MODEL);
 
     // TZ §8.3 — opportunistic sqlite-vec, brute-force fallback if it doesn't
     // pan out on this device; either way vectors.* below just works.
@@ -325,10 +342,19 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
   /**
    * TZ §6.4 — evaluates `target` against the current device snapshot plus
    * any locally-cached `LocalRuntimeVerdict`. Resolves `verdict: 'unknown'`
-   * (never throws) if no manifest is cached yet.
-   * @param target Which artifact to evaluate — defaults to `'model'`.
+   * (never throws) if no manifest is cached yet, or if `modelId` doesn't
+   * name a model in it.
+   * @param target Which artifact kind to evaluate — defaults to `'model'`.
+   * @param modelId Which model to check — defaults to the resolved
+   *   selected model (multi-model plan §7). Always a *model* id, even for
+   *   `target: 'embedding'` — resolves that model's compatible embedding
+   *   via `compatibleModelIds` rather than taking an embedding id
+   *   directly, so a model-picker UI can badge "won't fit" per model
+   *   without the caller needing to know embedding ids at all. Passing an
+   *   explicit id never mutates `selectedModelId` — a readonly check, e.g.
+   *   for a model the user hasn't chosen yet.
    */
-  async checkDeviceEligibility(target: 'model' | 'embedding' = 'model'): Promise<EligibilityReport> {
+  async checkDeviceEligibility(target: 'model' | 'embedding' = 'model', modelId?: string): Promise<EligibilityReport> {
     const manifest = this.currentManifest ?? (await this.manifestService.getCachedManifest());
     if (!manifest) {
       return {
@@ -337,7 +363,33 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
         device: await this.ports.deviceInfo.getSnapshot(),
       };
     }
-    const artifact = target === 'embedding' ? manifest.embedding : manifest.model;
+
+    let artifact: { id: string; version: number; minRamGb: number; recommendedRamGb: number; sizeBytes: number };
+    if (target === 'embedding') {
+      const resolvedModelId = modelId ?? this.resolveSelectedModel(manifest).id;
+      const embedding = manifest.embeddings.find((e) => e.status === 'active' && e.compatibleModelIds.includes(resolvedModelId));
+      if (!embedding) {
+        return {
+          verdict: 'unknown',
+          reasons: [`no active embedding is compatible with model "${resolvedModelId}"`],
+          device: await this.ports.deviceInfo.getSnapshot(),
+        };
+      }
+      artifact = embedding;
+    } else if (modelId) {
+      const found = manifest.models.find((m) => m.id === modelId);
+      if (!found) {
+        return {
+          verdict: 'unknown',
+          reasons: [`model "${modelId}" not found in the current manifest`],
+          device: await this.ports.deviceInfo.getSnapshot(),
+        };
+      }
+      artifact = found;
+    } else {
+      artifact = this.resolveSelectedModel(manifest);
+    }
+
     return this.eligibilityService.evaluate({
       id: artifact.id,
       version: artifact.version,
@@ -345,6 +397,101 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
       recommendedRamGb: artifact.recommendedRamGb,
       sizeBytes: artifact.sizeBytes,
     });
+  }
+
+  /**
+   * Records the user's model choice (multi-model plan §6 п.2). Validates
+   * `modelId` against the current manifest (must exist and be
+   * `status: 'active'`), persists it to `kv_store` (independent of the
+   * manifest's own cache — a manifest refresh doesn't reset which model
+   * the user picked), and emits `model:selected`. Deliberately does
+   * **not** download or load anything itself — symmetric with
+   * `refreshManifest()` not auto-starting a download (TZ §5.4). Call
+   * `ensureModelReady()`/`switchModel()` afterward to actually apply it;
+   * both converge to whatever `selectedModelId` now is.
+   */
+  async selectModel(modelId: string): Promise<void> {
+    await this.ensureManifestLoaded();
+    const manifest = this.currentManifest!;
+    const model = manifest.models.find((m) => m.id === modelId);
+    if (!model || model.status !== 'active') {
+      throw new ConfigInvalidError(`selectModel(): "${modelId}" is not an active model in the current manifest`);
+    }
+    await this.setKv(KV_KEY_SELECTED_MODEL, modelId);
+    this.selectedModelId = modelId;
+    await this.emit('model:selected', { modelId });
+  }
+
+  /**
+   * The persisted user model choice, or `null` if none was ever made —
+   * `resolveSelectedModel()`'s fallback (`recommended`, else first
+   * `status: 'active'`) is what actually runs the device in that case, not
+   * this getter.
+   */
+  getSelectedModelId(): string | null {
+    return this.selectedModelId;
+  }
+
+  /**
+   * Resolves which `ModelArtifact` is "the selected one" right now — the
+   * persisted choice if it still names an active model in `manifest`,
+   * otherwise the manifest's `recommended: true` model, otherwise the
+   * first `status: 'active'` model (multi-model plan §6 п.1/п.3). Never
+   * silently crashes on a stale/removed selection (e.g. the previously
+   * chosen model was deprecated upstream) — always falls back instead.
+   * Synchronous: relies on {@link selectedModelId}'s in-memory cache
+   * rather than re-reading `kv_store`.
+   */
+  private resolveSelectedModel(manifest: LocalAiManifest): ModelArtifact {
+    const bySelection = this.selectedModelId
+      ? manifest.models.find((m) => m.id === this.selectedModelId && m.status === 'active')
+      : undefined;
+    if (bySelection) return bySelection;
+    const recommended = manifest.models.find((m) => m.recommended === true && m.status === 'active');
+    const fallback = recommended ?? manifest.models.find((m) => m.status === 'active');
+    if (!fallback) {
+      throw new ConfigInvalidError('manifest.models has no active model to select from');
+    }
+    return fallback;
+  }
+
+  /**
+   * Resolves `modelId`'s compatible embedding — `manifest.embeddings.find`
+   * on `compatibleModelIds`, TZ §5.1's "one embedding can serve several
+   * models" design (multi-model plan §1/§6 п.5). Throws if none exists;
+   * `validateManifest()`'s cross-check (Phase 2) guarantees this can't
+   * happen for an active model in a manifest that passed validation, so
+   * reaching this only from a genuinely broken manifest is the intended
+   * failure mode here (unlike `checkDeviceEligibility()`'s "never throws"
+   * contract, which inlines the same lookup non-throwing).
+   */
+  private resolveEmbeddingForModel(manifest: LocalAiManifest, modelId: string): EmbeddingArtifact {
+    const embedding = manifest.embeddings.find((e) => e.status === 'active' && e.compatibleModelIds.includes(modelId));
+    if (!embedding) {
+      throw new ConfigInvalidError(`no active embedding declares compatibleModelIds including model "${modelId}"`);
+    }
+    return embedding;
+  }
+
+  private isSameModel(artifact: ModelArtifact): boolean {
+    return this.loadedModelArtifact?.id === artifact.id && this.loadedModelArtifact?.version === artifact.version;
+  }
+
+  private isSameEmbedding(artifact: EmbeddingArtifact): boolean {
+    return this.loadedEmbeddingArtifact?.id === artifact.id && this.loadedEmbeddingArtifact?.version === artifact.version;
+  }
+
+  private async getKv(key: string): Promise<string | null> {
+    const rows = await this.ports.sqlite.query<{ value: string }>('SELECT value FROM kv_store WHERE key = ?', [key]);
+    return rows[0]?.value ?? null;
+  }
+
+  private async setKv(key: string, value: string): Promise<void> {
+    await this.ports.sqlite.execute(
+      `INSERT INTO kv_store (key, value, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      [key, value, this.ports.clock.nowIso()],
+    );
   }
 
   /**
@@ -362,7 +509,8 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
   async getDownloadProgress(target: 'model' | 'embedding' = 'model'): Promise<PartialDownloadProgress | null> {
     const manifest = this.currentManifest ?? (await this.manifestService.getCachedManifest());
     if (!manifest) return null;
-    const artifact = target === 'embedding' ? manifest.embedding : manifest.model;
+    const selectedModel = this.resolveSelectedModel(manifest);
+    const artifact = target === 'embedding' ? this.resolveEmbeddingForModel(manifest, selectedModel.id) : selectedModel;
     const path = this.ports.fileSystem.resolvePath(target === 'embedding' ? 'embeddings' : 'models', artifact.filename);
     const stat = await this.ports.fileSystem.stat(path);
     if (!stat || stat.sizeBytes <= 0) return null;
@@ -384,7 +532,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
   async pauseModelDownload(): Promise<void> {
     const manifest = this.currentManifest ?? (await this.manifestService.getCachedManifest());
     if (!manifest) return;
-    const artifact = manifest.model;
+    const artifact = this.resolveSelectedModel(manifest);
     await this.downloadEngine.pause(this.downloadEngine.keyFor(resolveArtifactUrl(artifact), artifact.filename));
   }
 
@@ -397,7 +545,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
   async resumeModelDownload(): Promise<void> {
     const manifest = this.currentManifest ?? (await this.manifestService.getCachedManifest());
     if (!manifest) return;
-    const artifact = manifest.model;
+    const artifact = this.resolveSelectedModel(manifest);
     await this.downloadEngine.resume(this.downloadEngine.keyFor(resolveArtifactUrl(artifact), artifact.filename));
   }
 
@@ -414,7 +562,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
   async deleteModel(): Promise<void> {
     const manifest = this.currentManifest ?? (await this.manifestService.getCachedManifest());
     if (manifest) {
-      const artifact = manifest.model;
+      const artifact = this.resolveSelectedModel(manifest);
       const key = this.downloadEngine.keyFor(resolveArtifactUrl(artifact), artifact.filename);
       const destinationPath = this.ports.fileSystem.resolvePath('models', artifact.filename);
       await this.downloadEngine.cancel(key, destinationPath, { discardPartial: true });
@@ -422,6 +570,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
     if (this.modelLoaded) {
       await this.ports.llmRuntime.releaseModel();
       this.modelLoaded = false;
+      this.loadedModelArtifact = null;
       await this.emit('runtime:unloaded', { reason: 'model-deleted' });
     }
     await this.modelRegistry.clearCurrent('model');
@@ -455,8 +604,8 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
       return {
         modelChanged: false,
         embeddingChanged: false,
-        model: { to: cached.model },
-        embedding: { to: cached.embedding },
+        models: cached.models.map((m) => ({ id: m.id, from: m, to: m, changed: false })),
+        embeddings: cached.embeddings.map((e) => ({ id: e.id, from: e, to: e, changed: false })),
       };
     }
   }
@@ -574,21 +723,34 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
   /**
    * TZ §5.5/§6.4: support check → eligibility gate → download + sha256
    * verify (resumable, short-circuits if already downloaded) → load into
-   * the native runtime. Safe to call repeatedly — a no-op once the model
+   * the native runtime. Safe to call repeatedly — a true no-op (no
+   * download check, no runtime call) once the *currently selected* model
    * is already loaded.
+   *
+   * Multi-model plan §6 п.2/п.4: targets `resolveSelectedModel()`, not a
+   * fixed manifest field. If a *different* model is already loaded (the
+   * caller ran `selectModel()` without a follow-up `switchModel()`), this
+   * performs the same release-old/download-new/delete-old-file/invalidate
+   * sequence as `switchModel()` — both methods are documented as valid
+   * ways to apply a selection, so both must converge to it.
    * @param options.onProgress Called with download progress while the artifact is being fetched.
    */
   async ensureModelReady(options?: { onProgress?: (p: DownloadProgress) => void }): Promise<void> {
     await this.ensureSupportOk();
     await this.ensureManifestLoaded();
     const manifest = this.currentManifest!;
+    const artifact = this.resolveSelectedModel(manifest);
 
     // Always evaluate — applyEligibilityPolicy() is what decides whether a
     // given verdict actually blocks/warns/is ignored (TZ §6.4's policy is
     // per-verdict, not an all-or-nothing skip).
-    await this.applyEligibilityPolicy(await this.checkDeviceEligibility('model'));
+    await this.applyEligibilityPolicy(await this.checkDeviceEligibility('model', artifact.id));
 
-    const artifact = manifest.model;
+    if (this.modelLoaded && !this.isSameModel(artifact)) {
+      await this.performModelSwitch(artifact, options);
+      return;
+    }
+
     const { destinationPath } = await this.downloadArtifactLogged(
       'model',
       { filename: artifact.filename, url: resolveArtifactUrl(artifact), sha256: artifact.sha256, sizeBytes: artifact.sizeBytes },
@@ -619,9 +781,16 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
         kvCacheQuant: tuning.kvCacheQuant,
       });
       this.modelLoaded = true;
+      this.loadedModelArtifact = artifact;
       // Registers this as "current" even on a completely fresh install (no
       // prior row) — switchModel() needs an accurate baseline to compute
       // "previous" against on its very first call, not just after a switch.
+      // Deliberately doesn't act on `previous` here the way
+      // performModelSwitch() does: this branch only runs when nothing was
+      // loaded in *this* process, which on an ordinary app restart is the
+      // same model/version as before (no stale file, no session-cache
+      // invalidation needed) — see performModelSwitch()'s doc comment for
+      // the branch that actually changes models.
       await this.modelRegistry.setCurrent('model', {
         id: artifact.id,
         version: artifact.version,
@@ -650,19 +819,26 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
   }
 
   /**
-   * Same flow as {@link ensureModelReady}, independently, for the
-   * embedding artifact (TZ §5.6/§6.4).
+   * Same flow as {@link ensureModelReady}, independently, for whichever
+   * embedding {@link resolveEmbeddingForModel} resolves for the selected
+   * model (TZ §5.6/§6.4, multi-model plan §6 п.5).
    * @param options.onProgress Called with download progress while the artifact is being fetched.
    */
   async ensureEmbeddingReady(options?: { onProgress?: (p: DownloadProgress) => void }): Promise<void> {
     await this.ensureSupportOk();
     await this.ensureManifestLoaded();
     const manifest = this.currentManifest!;
+    const selectedModel = this.resolveSelectedModel(manifest);
+    const artifact = this.resolveEmbeddingForModel(manifest, selectedModel.id);
 
-    const report = await this.checkDeviceEligibility('embedding');
+    const report = await this.checkDeviceEligibility('embedding', selectedModel.id);
     await this.applyEligibilityPolicy(report);
 
-    const artifact = manifest.embedding;
+    if (this.embeddingLoaded && !this.isSameEmbedding(artifact)) {
+      await this.performEmbeddingSwitch(artifact, options);
+      return;
+    }
+
     const { destinationPath } = await this.downloadArtifactLogged(
       'embedding',
       { filename: artifact.filename, url: resolveArtifactUrl(artifact), sha256: artifact.sha256, sizeBytes: artifact.sizeBytes },
@@ -674,6 +850,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
       const absoluteModelPath = await this.ports.fileSystem.toAbsolutePath(destinationPath);
       await this.ports.llmRuntime.loadEmbeddingModel({ modelPath: absoluteModelPath });
       this.embeddingLoaded = true;
+      this.loadedEmbeddingArtifact = artifact;
       await this.modelRegistry.setCurrent('embedding', {
         id: artifact.id,
         version: artifact.version,
@@ -693,30 +870,24 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
   }
 
   /**
-   * Safe update ordering per TZ §5.5: eligibility gate → download + verify
-   * → release the LLM context only → register as current → delete the old
-   * model file → invalidate every session-cache file (their KV content is
-   * tied to the exact old weights) → reload. Re-checks
-   * `refreshManifest()`'s diff isn't this method's job — call it when
-   * `ManifestDiff.modelChanged` is what you want to act on; `switchModel()`
-   * always targets whatever `manifest.model` currently is.
+   * Safe update ordering per TZ §5.5, shared by `switchModel()`'s
+   * unconditional refresh and `ensureModelReady()`'s "a different model is
+   * live than the one selected" branch (multi-model plan §6 п.4): download
+   * + verify → release the LLM context only → register as current →
+   * delete the old model file → invalidate every session-cache file
+   * (their KV content is tied to the exact old weights) → reload.
    */
-  async switchModel(options?: { onProgress?: (p: DownloadProgress) => void }): Promise<void> {
-    await this.ensureSupportOk();
-    await this.ensureManifestLoaded();
-    const artifact = this.currentManifest!.model;
-
-    await this.applyEligibilityPolicy(await this.checkDeviceEligibility('model')); // step 1
-
-    // steps 2-3 — DownloadEngine verifies sha256 itself before resolving
+  private async performModelSwitch(artifact: ModelArtifact, options?: { onProgress?: (p: DownloadProgress) => void }): Promise<void> {
+    // steps 1-2 — DownloadEngine verifies sha256 itself before resolving
     const { destinationPath } = await this.downloadArtifactLogged(
       'model',
       { filename: artifact.filename, url: resolveArtifactUrl(artifact), sha256: artifact.sha256, sizeBytes: artifact.sizeBytes },
       options?.onProgress,
     );
 
-    await this.ports.llmRuntime.releaseModel(); // step 4 — LLM context only, embedding context untouched
+    await this.ports.llmRuntime.releaseModel(); // step 3 — LLM context only, embedding context untouched
     this.modelLoaded = false;
+    this.loadedModelArtifact = null;
     await this.emit('runtime:unloaded', { reason: 'model-switch' });
 
     const { previous } = await this.modelRegistry.setCurrent('model', {
@@ -725,14 +896,14 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
       filename: artifact.filename,
       sha256: artifact.sha256,
       sizeBytes: artifact.sizeBytes,
-    }); // step 5
+    }); // step 4
 
     if (previous && previous.filename !== artifact.filename) {
-      // step 6 — old file, never the one we just downloaded
+      // step 5 — old file, never the one we just downloaded
       await this.ports.fileSystem.deleteFile(this.ports.fileSystem.resolvePath('models', previous.filename)).catch(() => undefined);
     }
 
-    await this.sessionCache.invalidateAll(); // step 7
+    await this.sessionCache.invalidateAll(); // step 6
 
     options?.onProgress?.({ key: artifact.filename, kind: 'model', percent: 100, status: 'loading' });
     const absoluteModelPath = await this.ports.fileSystem.toAbsolutePath(destinationPath);
@@ -747,25 +918,42 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
       kvCacheQuant: tuning.kvCacheQuant,
     });
     this.modelLoaded = true;
+    this.loadedModelArtifact = artifact;
     await this.emit('runtime:model-loaded', { modelId: artifact.id, version: artifact.version });
   }
 
   /**
-   * Safe update ordering per TZ §5.6 — independent of {@link switchModel}:
-   * eligibility gate → download + verify → release the embedding context
-   * only → register as current → delete the old embedding file → emit
-   * `vector-store:embedding-changed` (never auto-reindexes existing
-   * vectors — `VectorStore`'s space guard, TZ §8.2/§8.3, is what actually
-   * blocks stale reads/writes until an explicit `vectors.reindex()`)
-   * → reload.
+   * Unconditionally re-runs {@link performModelSwitch} for whichever model
+   * `resolveSelectedModel()` currently resolves to (TZ §5.5, multi-model
+   * plan §6 п.4) — used e.g. right after `selectModel()`, or after
+   * `refreshManifest()` reports a version bump for the selected model.
+   * Unlike `ensureModelReady()`, this never short-circuits even if the
+   * resolved target happens to already be loaded — call it when you
+   * specifically want the update sequence to run, not just "make sure
+   * something usable is loaded".
    */
-  async switchEmbedding(options?: { onProgress?: (p: DownloadProgress) => void }): Promise<void> {
+  async switchModel(options?: { onProgress?: (p: DownloadProgress) => void }): Promise<void> {
     await this.ensureSupportOk();
     await this.ensureManifestLoaded();
-    const artifact = this.currentManifest!.embedding;
+    const manifest = this.currentManifest!;
+    const artifact = this.resolveSelectedModel(manifest);
 
-    await this.applyEligibilityPolicy(await this.checkDeviceEligibility('embedding'));
+    await this.applyEligibilityPolicy(await this.checkDeviceEligibility('model', artifact.id));
+    await this.performModelSwitch(artifact, options);
+  }
 
+  /**
+   * Safe update ordering per TZ §5.6 — independent of
+   * {@link performModelSwitch}: eligibility gate → download + verify →
+   * release the embedding context only → register as current → delete the
+   * old embedding file → emit `vector-store:embedding-changed` (never
+   * auto-reindexes existing vectors — `VectorStore`'s space guard, TZ
+   * §8.2/§8.3, is what actually blocks stale reads/writes until an
+   * explicit `vectors.reindex()`) → reload. Shared by `switchEmbedding()`'s
+   * unconditional refresh and `ensureEmbeddingReady()`'s "different
+   * embedding is live" branch, same pairing as the model side.
+   */
+  private async performEmbeddingSwitch(artifact: EmbeddingArtifact, options?: { onProgress?: (p: DownloadProgress) => void }): Promise<void> {
     const { destinationPath } = await this.downloadArtifactLogged(
       'embedding',
       { filename: artifact.filename, url: resolveArtifactUrl(artifact), sha256: artifact.sha256, sizeBytes: artifact.sizeBytes },
@@ -776,6 +964,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
 
     await this.ports.llmRuntime.releaseEmbeddingModel();
     this.embeddingLoaded = false;
+    this.loadedEmbeddingArtifact = null;
     await this.emit('runtime:unloaded', { reason: 'embedding-switch' });
 
     const { previous } = await this.modelRegistry.setCurrent('embedding', {
@@ -803,7 +992,20 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
     const absoluteModelPath = await this.ports.fileSystem.toAbsolutePath(destinationPath);
     await this.ports.llmRuntime.loadEmbeddingModel({ modelPath: absoluteModelPath });
     this.embeddingLoaded = true;
+    this.loadedEmbeddingArtifact = artifact;
     await this.emit('runtime:embedding-loaded', { embeddingId: artifact.id, version: artifact.version });
+  }
+
+  /** Unconditional counterpart to {@link switchModel}, for the embedding resolved from the selected model — see {@link performEmbeddingSwitch}. */
+  async switchEmbedding(options?: { onProgress?: (p: DownloadProgress) => void }): Promise<void> {
+    await this.ensureSupportOk();
+    await this.ensureManifestLoaded();
+    const manifest = this.currentManifest!;
+    const selectedModel = this.resolveSelectedModel(manifest);
+    const artifact = this.resolveEmbeddingForModel(manifest, selectedModel.id);
+
+    await this.applyEligibilityPolicy(await this.checkDeviceEligibility('embedding', selectedModel.id));
+    await this.performEmbeddingSwitch(artifact, options);
   }
 
   /**
@@ -816,12 +1018,15 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
    * @param signal Optional `AbortSignal` to cancel mid-generation.
    */
   complete(input: CompletionInput, signal?: AbortSignal): CompletionStream<CompletionResult> {
-    if (!this.modelLoaded || !this.currentManifest) {
+    if (!this.modelLoaded || !this.currentManifest || !this.loadedModelArtifact) {
       const message = 'call ensureModelReady() before complete()';
       this.config.logger?.error(message); // complete() must return CompletionStream synchronously — can't await dispatchLog()'s LogStore write here, so this bypasses the persisted store (logger callback only)
       return rejectedCompletionStream(new RuntimeInitError(message));
     }
-    return this.runtimeFacade.complete(input, { chatTemplate: this.currentManifest.model.chatTemplate }, signal);
+    // The actually-loaded model's template, not resolveSelectedModel()'s —
+    // selectedModelId can change without a follow-up switch (multi-model
+    // plan §12.4); complete() must reflect what's really in the runtime.
+    return this.runtimeFacade.complete(input, { chatTemplate: this.loadedModelArtifact.chatTemplate }, signal);
   }
 
   /**
@@ -903,12 +1108,14 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
       signal?: AbortSignal;
     },
   ): CompletionStream<ChatMessage> {
-    if (!this.modelLoaded || !this.currentManifest) {
+    if (!this.modelLoaded || !this.currentManifest || !this.loadedModelArtifact) {
       const message = 'call ensureModelReady() before sendMessage()';
       this.config.logger?.error(message); // sendMessage() must return CompletionStream synchronously too — same caveat as complete()
       return rejectedCompletionStream(new RuntimeInitError(message));
     }
-    const manifest = this.currentManifest;
+    // The actually-loaded model, not resolveSelectedModel()'s — same
+    // reasoning as complete() above (multi-model plan §12.4).
+    const loadedModel = this.loadedModelArtifact;
     const userMessageId = options?.userMessageId ?? globalThis.crypto.randomUUID();
     const assistantMessageId = options?.assistantMessageId ?? globalThis.crypto.randomUUID();
     const queue = new AsyncTokenQueue<CompletionToken>();
@@ -935,7 +1142,7 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
         })),
       );
       const maxContextTokens =
-        this.config.maxContextTokens ?? defaultMaxContextTokens(manifest.model.contextLength, options?.completionOptions?.maxTokens);
+        this.config.maxContextTokens ?? defaultMaxContextTokens(loadedModel.contextLength, options?.completionOptions?.maxTokens);
       // May throw ContextWindowExceededError ('fail' strategy) — the whole
       // `result` promise rejects here, which is correct: generation never
       // started, but the user message above is already durably saved.
@@ -949,12 +1156,12 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
       // full windowed history either way, so a cold start here never
       // changes correctness, only how much KV state the native plugin gets
       // to reuse under the hood.
-      const modelFingerprint = `${manifest.model.id}:${manifest.model.version}`;
+      const modelFingerprint = `${loadedModel.id}:${loadedModel.version}`;
       await this.sessionCache.activate(chatId, modelFingerprint).catch(() => ({ loadedFromCache: false }));
 
       const stream = this.runtimeFacade.complete(
         { messages: windowed.messages, options: options?.completionOptions },
-        { chatTemplate: manifest.model.chatTemplate },
+        { chatTemplate: loadedModel.chatTemplate },
         options?.signal,
       );
       const forwarding = (async () => {
@@ -1101,14 +1308,25 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
     await this.logStore.clear();
   }
 
-  /** The active embedding's `VectorSpaceDescriptor` — throws if no manifest/embedding is known yet. */
+  /**
+   * The active embedding's `VectorSpaceDescriptor` — throws if no
+   * manifest is known yet. Prefers the actually-loaded embedding
+   * ({@link loadedEmbeddingArtifact}) so an in-flight `vectors.*` call
+   * reflects the runtime's real state; falls back to resolving the
+   * selected model's compatible embedding when nothing is loaded yet
+   * (matches the original single-model behavior — `ensureSchema()` /
+   * `reindex()` are meant to work ahead of an explicit
+   * `ensureEmbeddingReady()` call, multi-model plan §6 п.5).
+   */
   private activeVectorSpace(): VectorSpaceDescriptor {
     if (!this.currentManifest) {
       const message = 'no manifest loaded yet — call refreshManifest()/ensureEmbeddingReady() first';
       this.config.logger?.error(message); // synchronous getter/method — logger callback only, same reasoning as complete()/sendMessage() above
       throw new RuntimeInitError(message);
     }
-    const embedding = this.currentManifest.embedding;
+    const embedding =
+      this.loadedEmbeddingArtifact ??
+      this.resolveEmbeddingForModel(this.currentManifest, this.resolveSelectedModel(this.currentManifest).id);
     return { embeddingId: embedding.id, embeddingVersion: embedding.version, dimensions: embedding.dimensions };
   }
 
@@ -1173,7 +1391,9 @@ export class LocalAiClient implements ConversationApi, ConversationSyncApi, Chat
   ): Promise<void> {
     await this.lifecycleManager.releaseRuntime(options);
     this.modelLoaded = false;
+    this.loadedModelArtifact = null;
     this.embeddingLoaded = false;
+    this.loadedEmbeddingArtifact = null;
     this.currentManifest = null; // in-memory only — still recoverable from kv_store via getCachedManifest()
     this.sessionCache.resetHotHandle();
     await this.emit('runtime:unloaded', { reason });

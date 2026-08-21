@@ -1,16 +1,24 @@
 /**
- * Manifest schema — TZ §5.2. Model and embedding are independent top-level
- * artifacts with independent version histories; compatibility is declared
- * explicitly via `EmbeddingArtifact.compatibleModelIds` rather than assumed
- * from co-location in the manifest. See TZ §5.1 for the rationale and
- * `manifest.service.ts` (Phase 1) for the validation rules from this
+ * Manifest schema — TZ §5.2. Models and embeddings are independent
+ * top-level artifact lists with independent version histories per id;
+ * compatibility is declared explicitly via
+ * `EmbeddingArtifact.compatibleModelIds` rather than assumed from
+ * co-location in the manifest. See TZ §5.1 for the rationale and
+ * `manifest.service.ts` (Phase 1/2) for the validation rules from this
  * section (pinned revision, https-only embedding URL, hash format, etc).
+ *
+ * `models`/`embeddings` were promoted from singular `model`/`embedding`
+ * fields to arrays by `docs/plans/llama2/2026-08-21-multi-model-selection-plan.md`
+ * §3 — a device that can't run the flagship model still needs *some*
+ * option in Settings. `previousModels`/`previousEmbeddings` remain a
+ * separate, singular-history concept ("this id used to be at version N") —
+ * not alternatives on offer, see that plan's §1.
  */
 export interface LocalAiManifest {
   manifestVersion: number;
   publishedAt: string;
-  model: ModelArtifact;
-  embedding: EmbeddingArtifact;
+  models: ModelArtifact[];
+  embeddings: EmbeddingArtifact[];
   previousModels?: ModelArtifact[];
   previousEmbeddings?: EmbeddingArtifact[];
 }
@@ -41,6 +49,17 @@ export interface ModelArtifact {
    */
   chatTemplate: 'auto' | 'qwen' | 'llama3' | 'gemma' | 'mistral' | 'raw';
   status: 'active' | 'deprecated';
+  /**
+   * The publishing side's explicit pick for a new user's default, when
+   * `models[]` has more than one option — at most one model per manifest
+   * may set this `true` (`validateManifest()` enforces it); optional/absent
+   * is fine (`LocalAiClient` falls back to the first `status: 'active'`
+   * model). Deliberately an explicit field rather than a client-side
+   * heuristic ("biggest model that's still `'ok'` eligibility") — simpler,
+   * predictable, and doesn't depend on getting a device-scoring heuristic
+   * right. See the multi-model plan §3/§12.1.
+   */
+  recommended?: boolean;
 }
 
 export interface EmbeddingArtifact {
