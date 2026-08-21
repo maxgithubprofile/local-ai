@@ -801,6 +801,48 @@ narrative conclusion, no mid-sentence cut. Full technical detail and the regener
 `forta.chat`'s own commit on `llama2-perf` (same date) — this entry is the cross-reference for anyone
 reading `local-ai`'s own history first.
 
+### Per-token streamer leaked literal `"byte: \xNN"` debug text for split multi-byte UTF-8 characters (2026-08-21)
+
+**Found by the user, eyeballing an AI reply on-device**: streamed and persisted text contained literal
+garbage like `Классика! byte: \x90byte: \xbe...` instead of the intended characters — visible both live
+during streaming and in the message afterwards, in an existing chat from before this fix.
+
+**Root cause**: `llama-cpp-pro`'s two real per-token streaming call sites (Android's `jni.cpp` generation
+loop, iOS's `cap-ios-bridge.cpp` `token_callback`) formatted each token with
+`capllama::tokens_to_output_formatted_string()` — a formatter meant for debug/probs listings
+(`cap-completion.cpp`'s legitimate debug dump, left untouched) that renders any byte it can't interpret
+as a printable character as literal `"byte: \xNN"` text. Byte-level BPE tokenizers (Qwen included)
+routinely emit a token that is only a *fragment* of a UTF-8 character — a lone continuation byte with no
+lead byte, or a lead byte with its continuation byte(s) still one token away. Fed one fragment at a time
+into the debug formatter, each incomplete byte got rendered as its own `"byte: \xNN"` string instead of
+being held back and reassembled with the next token(s) into the real character. This is the same root
+class of bug as the `sanitize_utf8()` entry above (byte-level BPE splitting a UTF-8 character across
+token boundaries) but on the *encoding* side of the pipeline rather than the JNI *string-conversion*
+side — `sanitize_utf8()` guards `NewStringUTF()` against genuinely invalid bytes reaching the JVM, but by
+that point the formatter had already turned valid-when-reassembled fragments into permanent, valid-UTF-8
+garbage text, so the earlier fix couldn't catch this.
+
+**Fix**: added `format_token_utf8_safe(ctx, token, pending)` (`cpp/cap-llama.h`/`cap-llama.cpp`) — buffers
+a token's raw piece bytes into a caller-owned `pending` string, scans for the longest complete-UTF-8-
+sequence prefix, returns only that prefix, and leaves any trailing incomplete sequence in `pending` for
+the next call to complete. A byte that can never start a valid sequence is dropped (one character lost,
+matching `sanitize_utf8()`'s "cost at most one character" precedent) rather than re-emitted as debug
+text. Wired in at both real streaming call sites in place of `tokens_to_output_formatted_string()`,
+each with its own `pending_utf8` buffer declared before the token loop; `jni.cpp`'s `emit_partial` block
+and iOS's `token_callback` are now guarded with `!token_text.empty()` since a fragment-only token
+legitimately produces nothing to emit yet. Patch regenerated (`patches/llama-cpp-pro+0.2.4.patch` in
+`forta.chat`) via manual reconstruction after `npx patch-package` crashed on Windows CRLF diff noise
+(unrelated pre-existing tooling issue, not this bug) — verified byte-identical to the live edits by
+re-running the real `patch-package` applier against a scratch pristine copy.
+
+**Verified on the same device**: rebuilt the native library (confirmed real recompilation via compiler
+warning output, not "UP-TO-DATE"), no crash signal in logcat. The pre-fix broken chat above stayed
+visible in the chat list for direct comparison; a fresh chat with a prompt designed to provoke
+multi-byte characters (emoji + Cyrillic) produced a clean reply with correctly-rendered emoji and zero
+`"byte: \x"` leakage. Full technical detail and the regenerated patch diff live in `forta.chat`'s own
+commit on `llama2-perf` (same date) — this entry is the cross-reference for anyone reading `local-ai`'s
+own history first.
+
 ### `enable_thinking: false` device-verified through the native jinja path, not the ChatML fallback (2026-08-20)
 
 Perf-tuning plan §4 (`forta.chat`'s `docs/plans/llama2/2026-08-20-local-ai-perf-tuning-plan.md`).
