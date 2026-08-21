@@ -883,3 +883,41 @@ Also worth noting for the next person pulling this device's SQLite over `adb`: `
 a `spawnSync(..., { encoding: undefined })`-style raw Buffer capture (Node) rather than a shell `>`
 redirect, or the pulled file silently isn't a valid SQLite database (`ERR_SQLITE_ERROR: file is not a
 database` when opened).
+
+### Visual per-token streaming confirmed in the `forta.chat` chat screen itself, not just the bridge (2026-08-21)
+
+Perf-tuning plan §11 open question #6 (`forta.chat`'s
+`docs/plans/llama2/2026-08-20-local-ai-perf-tuning-plan.md`). Everything up to this point had confirmed
+the *bridge* (`@LlamaCpp_onToken` → `notifyListeners`, "Android per-token streaming fixed" entry above)
+and the *store* (`ai-chat-store.ts`'s `for await` loop) but nobody had watched the actual chat screen to
+confirm `AiChatView.vue`'s bubble really repaints per token rather than sitting static until the whole
+reply lands at once.
+
+**Method** (`forta.chat`'s new `scripts/device-e2e/verify-visual-token-streaming.mjs`, on `iter1`, real
+device P80): sent a prompt over CDP, then polled the DOM every 500ms anchored on the streaming cursor
+markup itself (`AiChatView.vue`'s `.animate-pulse.bg-current` span, rendered only while
+`message.status === 'streaming'`) rather than a generic "nearest preceding text" heuristic — an earlier
+attempt at this same check used that heuristic and got a false-positive match against an unrelated
+sidebar chat-list preview a couple of screens away (same failure class `enable_thinking`'s own
+verification entry above already warned about with its CDP/DOM-polling caveat). Anchoring on the cursor
+element's own parent bubble sidesteps that: no cursor present means no streaming bubble to misread.
+
+**Result**: 26 distinct length samples on the streaming bubble's `textContent`, growing from 2 to 85
+characters over `+41.5s` to `+54.8s` after send, word-by-word/token-by-token
+("` С`" → "` Соб`" → "` Собак`" → … → " Собака по имени Полька жила в парке. Её друзья — "), while the
+cursor span was present; the cursor disappeared and the bubble read as final (90 chars) the moment the
+last sample landed. Cross-checked against a concurrent `adb logcat` capture: native generation for this
+exact turn ran token 1 at `16:53:11.646` through `Reached end-of-generation` at `16:53:24.866` (34
+tokens, ~13.2s) — matches the DOM growth window (`16:53:12.7`–`16:53:26.0`, given the send-time offset
+and 500ms poll granularity) to within about a second. This is a real per-token repaint, not a
+synthetic/batch one — closes plan §11 item 6.
+
+Also worth recording for whoever reruns this: the *first* attempt at this script used the same
+"find text near the sent message's position in `visibleTexts()`" heuristic as the `enable_thinking`
+verification, and it reproduced that exact false positive (a sidebar preview string, coincidentally
+close in length to the real reply, read as the "reply" at `+2.8s` — long before generation had even
+started per logcat). A second bug in the same first attempt — a stop condition comparing only the two
+most recently *recorded* (length-changed) samples' timestamps, rather than time since the last actual
+change — caused the loop to exit after just 2 samples once they happened to be >8s apart, even though
+generation was still running. Both are fixed in the anchored, cursor-based version now checked in;
+worth reading its doc comment before trusting a future variant of this kind of script.
