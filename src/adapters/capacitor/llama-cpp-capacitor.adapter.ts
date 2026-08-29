@@ -18,7 +18,7 @@ function toOaiMessages(messages: CompletionInput['messages']): LlamaCppOAICompat
 
 function samplingParams(options: CompletionInput['options']): Pick<
   CompletionParams,
-  'n_predict' | 'temperature' | 'top_p' | 'top_k' | 'seed' | 'stop' | 'enable_thinking'
+  'n_predict' | 'temperature' | 'top_p' | 'top_k' | 'seed' | 'stop' | 'enable_thinking' | 'penalty_repeat'
 > {
   return {
     n_predict: options?.maxTokens,
@@ -28,6 +28,15 @@ function samplingParams(options: CompletionInput['options']): Pick<
     seed: options?.seed,
     stop: options?.stop,
     enable_thinking: options?.enableThinking,
+    // Was never wired through despite CompletionOptions.repeatPenalty being
+    // public API (TZ §10.0) — the plugin's own native default
+    // (penalty_repeat: 1.1, penalty_last_n: 64) is too weak to stop a
+    // paragraph-length verbatim loop once a small/quantized model falls
+    // into one (live bug, 2026-08-29: see docs/decisions.md), and callers
+    // had no way to raise it from JS. `undefined` still preserves the
+    // plugin's own native default, same convention as every other
+    // omit-when-not-set field on this adapter.
+    penalty_repeat: options?.repeatPenalty,
   };
 }
 

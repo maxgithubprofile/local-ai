@@ -11,7 +11,7 @@ export type Capability = 'inference' | 'sql' | 'vectorSearch' | 'download' | 'de
 
 /** Result of {@link LocalAiClient.checkSupport} — platform/plugin availability, TZ §6.1. */
 export interface SupportReport {
-  platform: 'ios' | 'android' | 'web' | 'unknown';
+  platform: 'ios' | 'android' | 'web' | 'electron' | 'unknown';
   isNative: boolean;
   capabilities: Record<Capability, boolean>;
   missingPlugins: Array<{ capability: Capability; pluginName: string; required: boolean }>;

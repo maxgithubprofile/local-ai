@@ -1,0 +1,11 @@
+{
+  "name": "minimal-electron-app",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Worked example of local-ai's API surface on Electron — TZ v6, ROADMAP.md's Electron desktop support Phase 4. See README.md: this is illustrative source, not a scaffolded/buildable Electron project (no electron-builder config, no renderer UI) — copy the patterns into a real Electron app scaffold.",
+  "dependencies": {
+    "local-ai": "workspace:*",
+    "electron": "^44.0.0",
+    "llama-cpp-pro": "^0.2.4"
+  }
+}

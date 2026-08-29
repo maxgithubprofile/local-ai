@@ -70,8 +70,21 @@ describe('SupportChecker', () => {
   });
 
   it('normalizes an unrecognized platform string to "unknown"', async () => {
-    const platform = new FakePlatformSupportAdapter({ platform: 'electron', isNative: false, availablePlugins: [] });
+    const platform = new FakePlatformSupportAdapter({ platform: 'linux-gtk', isNative: false, availablePlugins: [] });
     const report = await new SupportChecker(platform).check();
     expect(report.platform).toBe('unknown');
+  });
+
+  it('recognizes "electron" as a real, non-degraded platform (TZ v6 §6.1, docs/decisions.md #4)', async () => {
+    const platform = new FakePlatformSupportAdapter({
+      platform: 'electron',
+      isNative: true,
+      availablePlugins: ['LlamaCpp', 'CapacitorSQLite', 'CapacitorDownloader'],
+    });
+    const report = await new SupportChecker(platform).check();
+    expect(report.platform).toBe('electron');
+    expect(report.capabilities.inference).toBe(true);
+    expect(report.capabilities.sql).toBe(true);
+    expect(report.capabilities.download).toBe(true);
   });
 });

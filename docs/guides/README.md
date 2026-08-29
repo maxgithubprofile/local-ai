@@ -15,3 +15,4 @@ Task-oriented guides for consumers of `local-ai` — TZ §12. Each assumes you'v
 | [testing-consumer-apps.md](./testing-consumer-apps.md) | Testing your own app's `local-ai` integration without a device. |
 | [manifest-format.md](./manifest-format.md) | The JSON your `manifestUrl` must serve, field by field, with validation rules. |
 | [logging-and-export.md](./logging-and-export.md) | `config.logger` vs. `config.logging`, `exportLogs()`/`clearLogs()`, wiring an "export logs" button. |
+| [electron-integration.md](./electron-integration.md) | Wiring `local-ai/adapters/electron`, the main-process-only constraint, and inference's current status. |

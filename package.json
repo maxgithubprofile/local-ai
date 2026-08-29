@@ -23,6 +23,11 @@
       "types": "./dist/adapters/node-testing/index.d.ts",
       "import": "./dist/adapters/node-testing/index.js",
       "require": "./dist/adapters/node-testing/index.cjs"
+    },
+    "./adapters/electron": {
+      "types": "./dist/adapters/electron/index.d.ts",
+      "import": "./dist/adapters/electron/index.js",
+      "require": "./dist/adapters/electron/index.cjs"
     }
   },
   "main": "./dist/core/index.cjs",
@@ -45,6 +50,7 @@
     "docs": "typedoc"
   },
   "peerDependencies": {
+    "electron": ">=28.0.0",
     "@capacitor-community/sqlite": ">=8.0.0",
     "@capacitor/app": ">=8.0.0",
     "@capacitor/core": ">=8.0.0",
@@ -54,6 +60,9 @@
     "llama-cpp-pro": ">=0.2.4"
   },
   "peerDependenciesMeta": {
+    "electron": {
+      "optional": true
+    },
     "@capacitor-community/sqlite": {
       "optional": true
     },
@@ -95,6 +104,7 @@
     "@typescript-eslint/parser": "^8.0.0",
     "better-sqlite3": "^13.0.3",
     "cross-env": "^10.1.0",
+    "electron": "^44.0.0",
     "eslint": "^9.9.0",
     "eslint-plugin-jsdoc": "^48.11.0",
     "llama-cpp-pro": "^0.2.4",

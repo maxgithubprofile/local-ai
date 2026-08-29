@@ -11,6 +11,17 @@ type ChatHistoryItem =
   | { type: 'user'; text: string }
   | { type: 'model'; response: string[] };
 
+/**
+ * `CompletionOptions.repeatPenalty` (TZ §10.0) maps to node-llama-cpp's
+ * contextual-repeat-penalty object rather than a bare number — `undefined`
+ * (not passed at all) preserves the library's own default (`penalty: 1.1`,
+ * `lastTokens: 64`), same convention as every other unset sampling option
+ * on this adapter.
+ */
+function repeatPenaltyOption(repeatPenalty: number | undefined): { penalty: number } | undefined {
+  return repeatPenalty !== undefined ? { penalty: repeatPenalty } : undefined;
+}
+
 function toChatHistory(messages: CompletionInput['messages']): ChatHistoryItem[] {
   return messages.map((m): ChatHistoryItem => {
     if (m.role === 'system') return { type: 'system', text: m.content };
@@ -114,6 +125,7 @@ export class NodeLlamaCppAdapter implements LlmRuntimePort {
               topK: input.options?.topK,
               seed: input.options?.seed,
               customStopTriggers: input.options?.stop,
+              repeatPenalty: repeatPenaltyOption(input.options?.repeatPenalty),
               onTextChunk,
             });
             const split = splitReasoningContent(response.response);
@@ -132,6 +144,7 @@ export class NodeLlamaCppAdapter implements LlmRuntimePort {
           topK: input.options?.topK,
           seed: input.options?.seed,
           customStopTriggers: input.options?.stop,
+          repeatPenalty: repeatPenaltyOption(input.options?.repeatPenalty),
           onTextChunk,
         });
         const split = splitReasoningContent(response.response);

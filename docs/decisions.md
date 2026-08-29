@@ -23,15 +23,18 @@ a decision.
 | 13 | Confirm `@capgo/capacitor-downloader` choice (esp. process-kill survival) | Open | Phase 0 spike ran (desk research: real API confirmed) but process-kill survival needs a physical device — `DownloadEngine` designed to always re-verify rather than trust resume blindly, so this stays functionally unblocking | 2026-08-10 | [0003](adr/0003-capgo-capacitor-downloader.md) |
 | 14 | Default `eligibilityPolicy` (`block` vs `warn` for `'no'`) | Open | Bootstrap follows TZ's stated default: `no → block`, `tight/unknown → warn` (§6.4) — flagged there as a product decision, not final | — | — |
 | 15 | How strictly to trust iOS thermal/low-power signals in eligibility | Open | Phase 0 spike (0004) confirmed the plugin passes `thermalState`/`lowPowerMode` through unmodified from iOS's own public APIs (no CPU/GPU temperature available on iOS, by OS design) — how much to *weight* that signal in the eligibility verdict is still a product calibration question, unchanged by this spike | 2026-08-10 | [0004](adr/0004-capgo-device-info.md) |
-| 16 | Ship `ConversationSyncApi` (Mode B) in the first release at all | Open | Implemented regardless (Phase 5, `upsertChat`/`appendMessages`, idempotent by `(chatId, id)`) per `ROADMAP.md`'s framing — the *implementation* task and the *release* decision are kept separate; this row stays open as the release question | 2026-08-10 | — |
+| 16 | Ship `ConversationSyncApi` (Mode B) in the first release at all | Resolved | **Yes, ships in v1.** Already implemented (Phase 5, `upsertChat`/`appendMessages`, idempotent by `(chatId, id)`); the user confirmed the release decision directly in response to `ROADMAP.md` FB.4, since a real consumer (Forta Chat) is already architecting their integration around it | 2026-08-29 | — |
 | 17 | Default `contextStrategy` (`'truncate-oldest'` vs `'fail'`) | Open | Bootstrap follows TZ's stated default: `'truncate-oldest'` (§9.7) — flagged there as a product decision, not final | — | — |
 | 18 | Whether `'cancelled'`/`'error'` messages show in UI by default | Open | N/A to the library (consumer-app UI decision) — documented as an integration-guide example only | — | — |
 | 19 | Is `LlmRuntimePort.countTokens()` mandatory, or is a heuristic acceptable pre-Phase-4 | Resolved | Both real runtime adapters (`NodeLlamaCppAdapter`, `LlamaCppCapacitorAdapter`) implement `countTokens()` for real via the underlying plugin's own tokenizer (`model.tokenize()`/`context.tokenize()`) — no heuristic needed once a model is loaded. A chars/4-style heuristic remains only as Phase 5's context-policy fallback for the brief window before any model is loaded (TZ §9.7) | 2026-08-10 | [0001](adr/0001-llama-cpp-capacitor-api.md) |
 | 20 | A method to free storage by removing the currently-installed model/embedding **without** downloading a replacement (`switchModel()`/`switchEmbedding()` only delete the old file as a side effect of fetching a new one) | Open | Raised by external consumer feedback (`2026-08-11-local-ai-library-feedback.md` #6, from the Forta Chat integration) — realistic mobile scenario (user wants the 2.5GB back with no replacement in hand). Not implemented; see `ROADMAP.md`'s "External feedback backlog" section, task FB.5 | 2026-08-11 | — |
 | 21 | Electron's production `SqlitePort` backend — `better-sqlite3` (real `loadExtension()`, so `sqlite-vec`'s primary vector-search path may finally be viable without a mobile device) vs. reusing `node:sqlite` (already proven in this repo's own tests, but `loadExtension()` unavailable on the Node version this repo's dev container has — untested whether that's a Node-version gap or a `node:sqlite` API gap on the version Electron actually bundles) | Open | Pending `ROADMAP.md`'s Electron spike ELEC.0.1 | — | — |
 | 22 | Whether Electron desktop needs its own `minRamGb`/`recommendedRamGb` calibration distinct from TZ §6.2's formula, or the same mobile-derived formula (`minRamGb ≈ ceil(sizeGB × 1.5)`) still holds on desktop hardware/OS memory-management characteristics | Open | Pending real-world desktop eligibility data; not blocking — the formula still produces a usable (if uncalibrated) verdict either way | — | — |
-| 23 | Does `llama-cpp-pro`'s desktop sidecar HTTP server support `stream: true` SSE on `POST /v1/chat/completions` (needed for per-token `CompletionStream`)? Its own `sidecar-client.cjs` convenience wrapper buffers the full response and never streams — confirmed by reading the installed package, not assumed — so this is genuinely unknown, not just unimplemented | Open | Pending `ROADMAP.md`'s Electron spike ELEC.0.1b (read/test `cap-sidecar-main.cpp`'s HTTP handler directly) | — | — |
-| 24 | Where `llama-cpp-pro`'s desktop sidecar binaries (per OS/arch/GPU-backend variant) actually come from for a `local-ai` consumer — build from source at release time via the plugin's own `build-variants.sh --variant desktop` (real CI cost: CMake/CUDA/Vulkan/Metal/ROCm toolchains across three OSes), vendor prebuilt binaries, or push the build step onto the host Electron app | Open | Pending `ROADMAP.md`'s Electron spike ELEC.0.1 | — | — |
+| 23 | Does `llama-cpp-pro`'s desktop sidecar HTTP server support `stream: true` SSE on `POST /v1/chat/completions` (needed for per-token `CompletionStream`)? Its own `sidecar-client.cjs` convenience wrapper buffers the full response and never streams — confirmed by reading the installed package, not assumed — so this is genuinely unknown, not just unimplemented | Resolved | **Yes.** `cap-native-server.cpp`'s own `chat_handler`/`completion_handler` read `stream` from the request body and, when true, call `start_live_completion_stream()` — real per-token SSE (`text/event-stream`, `data: {...}\n\n` chunks in the standard OpenAI `chat.completion.chunk` shape, `data: [DONE]` sentinel), not a buffered response. Confirmed by reading the handler source directly (no live server available to test against, ADR 0011). `LlamaCppProDesktopAdapter` should implement its own SSE client against this rather than falling back to a single synthetic chunk. | 2026-08-29 | [0012](adr/0012-electron-sidecar-streaming.md) |
+| 24 | Where `llama-cpp-pro`'s desktop sidecar binaries (per OS/arch/GPU-backend variant) actually come from for a `local-ai` consumer — build from source at release time via the plugin's own `build-variants.sh --variant desktop` (real CI cost: CMake/CUDA/Vulkan/Metal/ROCm toolchains across three OSes), vendor prebuilt binaries, or push the build step onto the host Electron app | Open | Still unresolved, and a real attempt to build from source in this environment (per `build-variants.sh`'s own recipe) found genuine MSVC compile defects (ADR 0011) — "who builds it" is moot until "does it build at all on this toolchain" is answered upstream. Whichever answer wins, the build itself needs to actually succeed first. | 2026-08-29 | [0011](adr/0011-electron-sidecar-build.md) |
+| 25 | No HTTP tokenize/detokenize endpoint exists on `llama-cpp-pro`'s desktop sidecar (`llama_cap_tokenize()`/`llama_cap_detokenize()` are internal C functions, never exposed as a route) — `LlmRuntimePort.countTokens()` is documented mandatory-real-tokenization elsewhere (row #19), but Electron's sidecar gives no lightweight way to satisfy that without either a wasteful real completion call or a heuristic | Open | Smallest-reasonable-assumption logged, not silently guessed: `LlamaCppProDesktopAdapter.countTokens()` should use the chars/4 heuristic unconditionally on Electron — a deliberate, documented per-platform deviation from row #19, not an oversight — until/unless `llama-cpp-pro` adds a real tokenize endpoint. Found while resolving row #23, same source-reading pass. | 2026-08-29 | [0012](adr/0012-electron-sidecar-streaming.md) |
+| 26 | No HTTP session/KV-cache persistence endpoint exists on `llama-cpp-pro`'s desktop sidecar — each `/v1/chat/completions` call reformats and reprocesses the full prompt from scratch; nothing server-side resumes a prior request's KV state. TZ §9.3's `SessionCache` "second response in the same chat is measurably faster" claim, real on both mobile adapters, has no way to hold on Electron | Open | Smallest-reasonable-assumption logged: `LlamaCppProDesktopAdapter.saveSession()` should be a no-op, `loadSession()` should always throw — reuses `SessionCache.activate()`'s already-tested cold-start fallback rather than inventing new behavior. This is a real, user-facing performance-characteristic gap vs. mobile, not silently absorbed — should be documented for Electron consumers. Found while resolving row #23, same source-reading pass. | 2026-08-29 | [0012](adr/0012-electron-sidecar-streaming.md) |
+| 27 | `CompletionOptions.topP`/`topK`/`seed`/`stop`/`repeatPenalty` have no path to `llama-cpp-pro`'s desktop sidecar's HTTP layer — its request parsers and internal completion-request JSON only ever carry `prompt`/`messages`/`max_tokens`/`temperature`/`stream`, confirmed by grepping the whole server source, zero matches for any of the other five. A genuine product/implementation choice: should `LlamaCppProDesktopAdapter` silently ignore these options on Electron, or throw/warn when a caller passes one | Resolved | Silently ignore — matches every other adapter's `undefined`-means-native-default convention (least surprising for a caller not specifically targeting Electron), implemented in `LlamaCppProDesktopAdapter.complete()`. Revisit if a real consumer reports confusion from a sampling option silently doing nothing on this one platform. | 2026-08-29 | [0012](adr/0012-electron-sidecar-streaming.md) |
 
 ## How to resolve a row
 
@@ -276,7 +279,8 @@ guess silently" rule instead of actioning ad hoc. Disposition of each:
 | 2 | `LocalAiClient` (1068 lines) mixes flat methods (`searchMessages`/`exportChat`/`exportLogs`/`clearLogs`) with the namespaced pattern (`client.vectors.*`/`client.downloads.*`) it already uses elsewhere | Logged as `ROADMAP.md` FB.1 — real refactor, not done in this pass (touches the public API surface + every call site, wants its own session) |
 | 3 | TZ §10 (public API) never updated for `searchMessages`/`exportChat(s)`/`updateMessage`/`deleteMessages`/`exportLogs`/`clearLogs` — CLAUDE.md calls the TZ "source of truth" | **Done** — §10 synced, version bumped to v5 (see TZ header) |
 | 4 | Product-open-questions (9 of 19 `Open` rows above) and engineering-open-tasks are interleaved in one list; no separate "must-decide-before-npm-publish" checklist | **Done** — added `docs/pre-release-checklist.md`, splits this ledger's `Open` rows by who needs to answer them |
-| 5 | `ConversationSyncApi` (Mode B) — the Forta Chat integration's entire architecture depends on it, but row #16 above is still `Open` ("ship in v1 at all?") | Not actionable by an agent — genuinely needs the product owner's word. Left `Open`, cross-referenced from the new pre-release checklist so it isn't missed |
+| 5 | `ConversationSyncApi` (Mode B) — the Forta Chat integration's entire architecture depends on it, but row #16 above is still `Open` ("ship in v1 at all?") | **Resolved 2026-08-29** — user confirmed yes, ships in v1 (row #16 now `Resolved`) |
+| 2 (cont.) | Namespace refactor approach, once undertaken | **Resolved 2026-08-29** — deprecated-alias transition: add `client.search.*`/`client.export.*`/`client.logs.*`, keep the existing flat methods as `@deprecated` aliases for a transition period rather than a hard break. `ROADMAP.md` FB.1 unblocked on this basis; implementation itself not started |
 | 6 | No "just delete the model, no replacement" method | Logged as new ledger row **#20** above + `ROADMAP.md` FB.5 |
 | 7 | MPL-2.0 (`@capgo/capacitor-downloader`) noted but not explained in practical terms | **Done** — added a short "License note" paragraph to README |
 | 8 | Eligibility thresholds are a generic formula (§6.2), not per-model calibrated data | **Done** (partial) — added a "Calibrated thresholds" table stub to `docs/guides/support-and-eligibility.md`, empty pending real-device runs; real calibration itself needs a device, tracked as `ROADMAP.md` FB.7 |
@@ -1171,3 +1175,139 @@ posture it already takes toward the plugin's Android/iOS native code today.
 See `ROADMAP.md`'s "Electron desktop support" section for the spike breakdown covering all three; no
 adapter code was written in this session — this entry and the TZ v6 diff are the decision + corrected
 plan, not the implementation.
+
+### `CompletionOptions.repeatPenalty` was dead — never forwarded to either real runtime adapter (2026-08-29)
+
+**Context:** User reported a `forta.chat` AI reply visibly repeating the same paragraph 4 times.
+Confirmed on-device, not a UI/streaming artifact — pulled the live SQLite DB off a real Android
+device (`adb shell run-as com.forta.chat cat databases/local_ai_*.db`, same method as the "session
+persistence" entry above) and found the exact stored `chat_messages.content` row contains one
+paragraph repeated verbatim 4 times (Qwen3-4B Q4_K_M, a "rewrite this story" prompt). `AiChatView.vue`/
+`ai-chat-store.ts` were checked and just render `accumulatedContent` as-is — no duplication there.
+
+**Root cause:** `CompletionOptions.repeatPenalty` is public API (`src/core/types.ts`, TZ §10.0) but
+neither `LlamaCppCapacitorAdapter.samplingParams()` nor `NodeLlamaCppAdapter.complete()` ever read it —
+confirmed by grepping `src/` for the identifier, only the type declaration itself matched. Reading the
+installed `llama-cpp-pro` package's native sources (`android/src/main/jni.cpp:729,732`) confirmed the
+plugin defaults to `penalty_repeat: 1.1`, `penalty_last_n: 64` (tokens) when the JS side omits them —
+standard llama.cpp defaults, but a 64-token window is shorter than the ~60-90 token paragraph that
+looped here, so once the model repeats the block once, the start of it has already aged out of the
+penalty window and nothing suppresses repeating it again. With `repeatPenalty` unwired, callers had no
+way to raise the penalty (or shrink/avoid this window problem) from JS even if they wanted to.
+
+**Fix:** wired `CompletionOptions.repeatPenalty` through in both adapters — `LlamaCppCapacitorAdapter`
+maps it to `CompletionParams.penalty_repeat` (`samplingParams()`); `NodeLlamaCppAdapter` maps it to
+node-llama-cpp's `repeatPenalty: { penalty }` shape (both the `chat.generateResponse()` and
+`LlamaCompletion.generateCompletionWithMeta()` call sites, mechanism 1 and mechanism 2 respectively).
+`undefined` still preserves each library's own native default, same convention as every other
+optional sampling field on these adapters. Pinned by two new cases in
+`test/unit/adapters/llama-cpp-capacitor.adapter.test.ts` (passes `penalty_repeat` through; leaves it
+unset when not given). `npm run lint`/`typecheck`/`test:unit`/`test:integration`/`build` all green
+after the change.
+
+**Not done here — a `forta.chat`-side follow-up:** `ai-chat-store.ts`'s `sendToRuntime()` only sets
+`completionOptions: { enableThinking: false }` today; it should also start passing a stronger
+`repeatPenalty` (e.g. `1.3`) now that the option actually reaches the native layer, to reduce the
+chance of this recurring on this class of small quantized model. Not a `local-ai` change.
+
+### Electron Phase 0/1 actually executed, not just planned (2026-08-29)
+
+**Context:** the previous "Electron desktop support" entry above (and `ROADMAP.md`'s matching section)
+was a plan with zero code written — every task `[ ]`. User asked to work the Electron roadmap for real,
+self-test, and make the judgment calls needed along the way rather than stopping to ask at each one.
+This entry logs the decisions made while actually doing that; `ROADMAP.md`'s own task rows carry the
+implementation-level detail, this is the "why," per this file's usual split.
+
+**What actually got run, not desk-researched:**
+- **ELEC.0.1** — a real sidecar build was attempted (CMake 4.4.2 + this environment's real VS2019/MSVC
+  toolchain). It genuinely fails, with 4 distinct real C++ portability defects found via 6 build/patch/
+  rebuild iterations (full transcript: [ADR 0011](adr/0011-electron-sidecar-build.md)). This is a materially
+  different outcome from the original entry's framing, which treated ELEC.0.1 as a "confirm the recipe
+  works" formality — decision: don't patch `llama-cpp-pro`'s vendored source locally (would silently
+  diverge from upstream releases), report the 4 defects upstream instead, and keep `ELEC.1.1a`
+  (`LlamaCppProDesktopAdapter`) blocked until a real binary exists. Not yet reported upstream — that's a
+  human action (filing an issue against a project this repo doesn't maintain), not something to do
+  silently on the user's behalf.
+- **ELEC.0.2** — real `os`/`fs.promises.statfs()` calls run on this environment's actual Windows/Node 22,
+  confirmed plausible. Found a real correction while reading `llama-cpp-pro/desktop`'s own installed
+  source: it deliberately avoids bare `os.freemem()` on macOS via a `vm_stat`-based estimate. Decision:
+  `ElectronDeviceInfoAdapter` reimplements that same logic (duplicated, not imported — the function isn't
+  exported from the peer package) rather than the originally-planned bare `os.freemem()`. See
+  [ADR 0009](adr/0009-electron-device-info.md).
+- **ELEC.0.3** — `electron` was not installed anywhere in this repo; added as a real `devDependency`
+  (`electron@44.0.0`, plus `peerDependencies`/`peerDependenciesMeta.optional: true`, mirroring how
+  `@capacitor/app` etc. are already handled) so event names could be checked against the real shipped
+  `.d.ts` rather than recalled from training — this itself was a judgment call (installing a new
+  dependency to make a spike verifiable rather than leaving it as `proposed`/unverified) made without
+  stopping to ask, on the reasoning that it's a low-risk, easily-reverted, precedented addition. See
+  [ADR 0010](adr/0010-electron-app-lifecycle.md).
+
+**Implemented and verified for real** (not just written): `ElectronDeviceInfoAdapter`,
+`ElectronAppLifecycleAdapter`, `ElectronPlatformSupportAdapter`, the `SqlitePort`/`FilesystemPort`/
+`DownloadTransportPort` re-exports, `package.json`'s `./adapters/electron` export, `tsup.config.ts`'s
+build entry, and `SupportReport`/`PlatformSupportPort`'s type extension to include `'electron'` (a real
+gap found and fixed along the way — the type only had `'ios'|'android'|'web'|'unknown'` before, and one
+existing unit test had actually encoded `'electron'` normalizing to `'unknown'` as its example, which
+needed correcting, not just extending). `pnpm run lint`/`typecheck`/`test:unit`/`test:integration`/
+`test:contract`/`build` all run and green after every change in this session, not assumed.
+
+**Also fixed, found while cross-referencing the TZ against `ROADMAP.md`'s already-corrected Electron
+section:** TZ v6 §2's summary table (a one-line row) still said Electron inference goes "через
+`node-llama-cpp` напрямую" — stale, contradicting §4.1's own already-corrected sidecar-based
+architecture (which explicitly says it supersedes that exact claim). Fixed the table row to match §4.1
+rather than leaving the TZ internally inconsistent with itself, per CLAUDE.md's "never silently
+contradict... the TZ is source of truth" rule extended to a case where the TZ contradicted itself.
+
+**Continued the same session, Phase 2-4:** rather than stopping at Phase 1, kept working forward and made
+two more judgment calls without stopping to ask, both logged here per this file's usual discipline:
+
+- **ELEC.2.2's CI matrix scope reduced from the original task text.** The plan called for
+  `windows-latest`/`macos-latest` runners to build the sidecar binary and test packaged-app
+  `loadExtension()`. Since ELEC.0.1/0.1a found real, unresolved blockers for both of those specifically,
+  scripting them into CI now would just add a permanently-red job — decision: extend the matrix for the
+  existing (already-passing) lint/typecheck/unit/integration/contract/build pipeline only, which still
+  gets real value (verifying the new Electron adapters on real Windows/macOS, not just Linux), and leave
+  a comment in the workflow flagging that `windows-latest`'s newer MSVC (VS2022) is worth re-attempting
+  ELEC.0.1's build against once CI access exists — this environment's own VS2019 might not be
+  representative.
+- **`examples/minimal-electron-app/` uses `FakeLlmRuntimeAdapter` as an explicit stand-in for the missing
+  `llmRuntime` port**, rather than skipping the example app entirely or leaving it uncompilable. Every
+  other port (`sql`/`download`/`fs`/`deviceInfo`/`appLifecycle`/`platformSupport`) is real, so the example
+  still demonstrates a genuine, working `LocalAiClient` on Electron — just not the actual chat-completion
+  path. Commented as a clearly-marked `TODO(ELEC.1.1a)`, not left implicit.
+
+Also found and fixed one more pre-existing gap while writing ELEC.3.1: `docs/guides/manifest-format.md`
+had never been updated for the 2026-08-21 multi-model manifest change — it still documented the old
+singular `model`/`embedding` shape, six days stale against `manifest.schema.ts`'s real `models[]`/
+`embeddings[]` arrays. Fixed as part of adding the desktop-scale example entry, not left for later.
+
+**Update, same day: ADR 0011's blocker turned out to have a real fix.** After the above was written,
+work continued (user: "run through the whole remaining Electron roadmap"). Rather than stopping at
+"rejected, report upstream," the investigation went one step further: the `char8_t` conflict between
+`llama-chat.cpp` and vendored `nlohmann/json.hpp` that made ADR 0011 give up on a global compiler flag
+turned out to be solvable with a **per-file** flag override (`set_source_files_properties(...)
+COMPILE_OPTIONS "/Zc:char8_t-")`, scoped to just the one file that needs it, leaving `nlohmann/json.hpp`
+compiling normally everywhere else — plus fixing a real bug in the earlier `_USE_MATH_DEFINES` patch
+(a per-file `#define` that didn't actually work due to include ordering; moved to a global compile
+definition instead). A full clean build then **succeeded** — real binary, real model load, real
+streamed SSE tokens, real embeddings, all confirmed by actually running it against
+`test/fixtures/stories260K.gguf`, not just compiling.
+
+This changed the shape of the rest of the session materially: `LlamaCppProDesktopAdapter`
+(ELEC.1.1a) was written and tested for real (14 unit tests against a real local `node:http` fixture
+server standing in for the sidecar), `examples/minimal-electron-app/` was updated to use it instead of
+`FakeLlmRuntimeAdapter`, and README/the Electron guide were rewritten again to describe real,
+working inference rather than a blocked feature. Two more real protocol gaps were found and resolved as
+smallest-reasonable-assumption decisions while reading the sidecar's HTTP server source to confirm
+streaming support (ledger row #23): no tokenize endpoint (row #25 — chars/4 heuristic on Electron
+specifically) and no session-persistence endpoint (row #26 — `saveSession()` no-op, `loadSession()`
+always throws, reusing `SessionCache`'s existing cold-start fallback); a fourth (row #27 — no
+`topP`/`topK`/`seed`/`stop`/`repeatPenalty` support in the sidecar's request body) was resolved here as
+"silently ignore," matching every other adapter's `undefined`-means-native-default convention.
+
+**Genuinely still not done:** ELEC.0.1a (packaged-app `loadExtension()` test — no packaged Electron app
+exists yet to test inside) and ELEC.3.2 (needs real desktop hardware across a RAM spread to calibrate
+against, not just to read numbers from — this session's one Windows dev box can't responsibly stand in
+for that). Both are real hardware/infrastructure gaps, not logic gaps — everything that could be
+verified by reading source and running real code in this environment now has been. See `ROADMAP.md` for
+the per-task status.

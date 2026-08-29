@@ -5,6 +5,29 @@ name: CI
 # real device/emulator (ROADMAP.md Phase 1, task 1.6; `docs/decisions.md`
 # #12 — device-e2e CI infra is still an open question, out of scope for
 # this workflow either way).
+#
+# windows-latest/macos-latest (ELEC.2.2, ROADMAP.md's "Electron desktop
+# support" Phase 2) run the *same* lint/typecheck/unit/integration/contract/
+# build steps as ubuntu-latest — nothing here builds the `llama-cpp-pro`
+# desktop sidecar or attempts a packaged-Electron-app `loadExtension()`
+# check. That's deliberate, not an oversight: `docs/adr/0011-electron-sidecar-build.md`
+# found real, unresolved MSVC compile defects in the vendored sidecar C++
+# source (a genuine upstream build blocker, not a "just script it" task),
+# and ELEC.0.1a (packaged-app `loadExtension()`) never ran for the same
+# reason — no working packaged build to test against yet. What these two
+# extra runners *do* verify for real: `ElectronDeviceInfoAdapter`/
+# `ElectronPlatformSupportAdapter`/`ElectronAppLifecycleAdapter` and the
+# `NodeFsAdapter`/`NodeSqliteAdapter`/`NodeRangeDownloadAdapter` re-exports
+# under `src/adapters/electron/` actually work on real Windows/macOS, not
+# just Linux — genuinely useful given Windows was already this repo's own
+# dev environment for that work (docs/decisions.md's "Electron Phase 0/1
+# actually executed" entry) but macOS has never been reachable at all
+# until this runner. Re-run `windows-latest` specifically against a fresh
+# `llama-cpp-pro` release before assuming ADR 0011's MSVC 2019-era findings
+# still hold — `windows-latest` ships a newer MSVC (VS2022) than this
+# repo's own dev environment (VS2019) had available, which the ADR
+# explicitly flags as untested and possibly relevant to the `char8_t`
+# conflict it found.
 on:
   pull_request:
   push:
@@ -12,9 +35,11 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
         node-version: [22.x]
     steps:
       - uses: actions/checkout@v4
@@ -48,9 +73,11 @@ jobs:
         run: pnpm run build
 
       - name: Generate TypeDoc site
+        if: matrix.os == 'ubuntu-latest'
         run: pnpm run docs
 
       - name: Upload TypeDoc site artifact
+        if: matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@v4
         with:
           name: typedoc-site

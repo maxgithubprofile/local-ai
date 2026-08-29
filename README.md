@@ -140,10 +140,29 @@ independent. See [`docs/guides/logging-and-export.md`](./docs/guides/logging-and
 
 ## Platform support
 
-Inference (`LlamaCpp` native plugin) requires a native Android/iOS build — unavailable on web/Electron
-by design (TZ §2, §6.1); `checkSupport()` reports this per-capability rather than failing the whole
-library, since `sql`/`download` can still work on web depending on which plugins are present. Run
-`LocalAiClient.checkSupport()` before `create()` to decide what to show the user.
+**Android/iOS** — inference (`LlamaCpp` native plugin) requires a native build, via
+`local-ai/adapters/capacitor` (TZ §6.1).
+
+**Electron (Windows/macOS/Linux)** — first-class, non-degraded support as of 2026-08-29
+(`docs/decisions.md` #4), not the earlier "unavailable by design" framing. Import
+`local-ai/adapters/electron` from your **main process only** (no native/filesystem access from the
+renderer without your own IPC bridge, same split as Capacitor's WebView). Inference goes through
+`llama-cpp-pro/desktop`'s compiled sidecar process (`LlamaCppProDesktopAdapter`), not `node-llama-cpp`
+(that stays a Node-side test tool only, TZ §13.1) — see `docs/guides/electron-integration.md`. Every
+port is implemented and tested for real, `LlmRuntimePort` included — confirmed end-to-end against a
+real sidecar binary and a real GGUF model (`docs/adr/0011-electron-sidecar-build.md`'s "Resolution"
+section: real streamed tokens, real embeddings, not mocked). Two honest, real caveats: the sidecar
+binary itself must be staged/built per that ADR's recipe wherever the app actually runs (`checkSupport()`
+reports `capabilities.inference: false` correctly if it isn't), and session-cache reuse doesn't speed up
+a second message the way it does on mobile — the sidecar has no KV-cache persistence endpoint
+(`docs/adr/0012-electron-sidecar-streaming.md`).
+
+**Web (browser, not Electron)** — degraded, unchanged: the library doesn't fail at import, but inference
+isn't available (TZ §4.1); `sql`/`download`/conversations may work depending on which plugins support
+web.
+
+Run `LocalAiClient.checkSupport()` before `create()` on any platform to decide what to show the user —
+it reports availability per-capability rather than failing the whole library.
 
 ## License note: `@capgo/capacitor-downloader` is MPL-2.0
 

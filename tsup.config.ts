@@ -11,6 +11,7 @@ export default defineConfig({
     'core/index': 'src/core/index.ts',
     'adapters/capacitor/index': 'src/adapters/capacitor/index.ts',
     'adapters/node-testing/index': 'src/adapters/node-testing/index.ts',
+    'adapters/electron/index': 'src/adapters/electron/index.ts',
   },
   format: ['esm', 'cjs'],
   dts: true,

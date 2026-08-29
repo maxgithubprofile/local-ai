@@ -648,15 +648,11 @@ disposition table. What's left as real engineering/product work:
   readonly sub-objects) for two capability groups; `searchMessages`, `exportChat`/`exportChats`,
   `exportLogs`/`clearLogs` are the odd ones out, sitting flat on `this` alongside 30+ other methods.
   Proposed shape: `client.search.messages(...)`, `client.export.chat(...)`/`.chats(...)`,
-  `client.logs.export(...)`/`.clear(...)`. This is a public-API-surface change (breaks any consumer
-  code already written against the flat names, incl. Forta Chat's own integration plan) — needs
-  either a major-version bump discipline or a deprecated-alias transition period; do not start without
-  confirming which with the user first. Not started.
-- [ ] **FB.4/§16.16 Get an explicit yes/no on shipping `ConversationSyncApi` (Mode B) in v1** — flagged
-  again here because a real consumer (Forta Chat) is already architecting their entire integration
-  around it; `docs/decisions.md` row #16 has been `Open` since Phase 5. Action: ask the user directly,
-  don't infer from "it's implemented and tested" (implementation and release-scope were deliberately
-  kept separate, see that row's resolution text).
+  `client.logs.export(...)`/`.clear(...)`. **Approach decided 2026-08-29** (`docs/decisions.md`):
+  deprecated-alias transition — add the namespaced methods, keep the existing flat ones as
+  `@deprecated` aliases rather than a hard break. Unblocked; implementation not started.
+- [x] **FB.4/§16.16 Get an explicit yes/no on shipping `ConversationSyncApi` (Mode B) in v1** —
+  **Resolved 2026-08-29**: yes, ships in v1. See `docs/decisions.md` row #16.
 - [ ] **FB.5/§16.20 `removeModel()`/`removeEmbedding()` without a replacement download** — new gap, not
   in the original TZ. `switchModel()`/`switchEmbedding()` only ever delete the old artifact file as a
   side effect of successfully downloading and verifying a new one (TZ §5.5/§5.6); there's no path to
@@ -672,8 +668,9 @@ disposition table. What's left as real engineering/product work:
   list in `ROADMAP.md`'s Phase 0 section.
 
 **Exit criterion:** none — this is a backlog, not a phase with a single done-state. Each row above
-gets checked off independently as it's actioned; FB.1 and FB.4 specifically should not be started
-without going back to the user first (API-breaking change / product decision respectively).
+gets checked off independently as it's actioned. FB.4's product decision and FB.1's breaking-change
+approach are both resolved (2026-08-29, `docs/decisions.md`); FB.1 and FB.5 are unblocked
+implementation tasks, FB.7 stays blocked on physical device access.
 
 ---
 
@@ -700,63 +697,93 @@ naturally passing bigger models on desktop-class RAM.
 **Dependency order:** 0.x spikes block everything (per this file's own Phase 0 convention — don't start
 1.x until each spike's ADR exists, `accepted` or `rejected` with a fallback). 1.x (adapters) blocks 2.x
 (packaging/export) blocks 3.x/4.x (manifest example, docs, example app). 5.x (CI) can start as soon as
-1.x's Node-testable adapters exist, independent of 2.x/3.x/4.x.
+1.x's Node-testable adapters exist, independent of 2.x/3.x/4.x. **Corrected 2026-08-29, after actually
+running Phase 0**: the real dependency graph is finer-grained than "1.x blocks on all of 0.x" — each
+1.x task lists its own specific spike dependency. **Updated again the same day**: ELEC.0.1's blocker
+(ADR 0011) turned out to have a real, verified fix — all of Phase 0 and Phase 1 are now done, including
+`LlamaCppProDesktopAdapter` (ELEC.1.1a), which this note originally expected to stay blocked
+indefinitely. Nothing in Phases 0-4 is blocked by ADR 0011 anymore.
 
 ### Phase 0 — Spikes
 
 Run via the `spike` skill, one ADR each under `docs/adr/`, same discipline as ADR 0001-0006.
 
-- [ ] **ELEC.0.1 `llama-cpp-pro` sidecar build/packaging spike** — resolves ledger row #24. The npm
-  package ships the sidecar's **source** (`sidecar/CMakeLists.txt`, `cap-sidecar-main.cpp`) and a staging/
-  packaging recipe (`scripts/stage-desktop-resources.cjs` → `extraResources/sidecar/<platform>-<arch>
-  [-<backend>]`, merged into an `electron-builder` config via `llama-cpp-pro/desktop/electron-builder`),
-  not prebuilt binaries for arbitrary consumers — confirm end-to-end: (a) running the plugin's own
-  `build-variants.sh --variant desktop` actually produces a working sidecar binary per OS (Windows/macOS/
-  Linux) and per detected GPU backend (`gpu-probe.cjs`/`backend-selector.cjs`: `metal`/`cuda`/`vulkan`/
-  `vulkan-openblas`/`cuda-openvino`/`metal-coreml`/ROCm — CPU-only `vulkan-openblas` fallback is the one
-  to verify first, GPU variants need matching hardware/toolchains); (b) `electron-builder`'s produced
-  package actually resolves the right binary at runtime via `resolveBinaryPath()`/`assertSidecarBinary()`
-  in both dev and packaged-app modes; (c) who is meant to run step (a) for a real `local-ai` release —
-  this repo's own CI, the host Electron app's CI, or a prebuilt-artifact source not yet found. Blocks:
-  ELEC.1.1 (can't write/verify the Electron `LlmRuntimePort` adapter without a working sidecar binary to
-  point it at).
-  - **ELEC.0.1a**, folded into the same spike: separately, confirm the chosen SQLite backend for
-    Electron (`better-sqlite3`, or `node:sqlite` at whatever Electron's bundled Node version actually
-    supports) exposes real `loadExtension()` inside a *packaged* Electron app (ties into ledger row #21
-    — independent of the sidecar question, this is about `SqlitePort`/`sqlite-vec`, not `LlmRuntimePort`).
-    If yes, `sqlite-vec`'s primary vector-search path (ADR 0002, currently `proposed`/mobile-unverified)
-    may become genuinely verifiable on desktop for the first time.
-  - **ELEC.0.1b**, its own ADR question, not folded in (different risk class — a protocol-level question,
-    not a build-system one): resolves ledger row #23. Does `cap-sidecar-main.cpp`'s HTTP server actually
-    support `stream: true`/SSE on `POST /v1/chat/completions`? Confirmed already (by reading, not
-    assuming) that `sidecar-client.cjs`'s own convenience wrapper does not — it buffers the full response
-    — so this needs either reading `cap-sidecar-main.cpp`'s request handler directly or a live test
-    against a running sidecar with `curl -N .../v1/chat/completions -d '{"stream":true,...}'`. If the
-    sidecar can't stream at the HTTP layer at all, `local-ai`'s Electron adapter falls back to emitting
-    the full response as one synthetic `CompletionStream` chunk (documented, already-used fallback shape,
-    ADR 0001) rather than genuine per-token delivery — a real UX regression vs. mobile worth flagging to
-    the user before ELEC.1.1 starts, not discovered mid-implementation.
-- [ ] **ELEC.0.2 Desktop device-info spike** — what Node/Electron API surface gives `totalRamGb`/
-  `freeRamGb`/`freeDiskBytes` cross-platform (Node's built-in `os.totalmem()`/`os.freemem()` plus
-  `fs.promises.statfs()` — already used by `NodeFsAdapter.freeSpaceBytes()`, SEC.3 — are the obvious
-  first choice; confirm they're accurate/available on all three OSes before reaching for a dependency
-  like `systeminformation`). Also settle what `DeviceSnapshot.thermal`/`lowPowerMode` should report on
-  desktop — TZ §6.2's table has no desktop-native equivalent of iOS thermal state; likely both stay
-  `undefined`/`'unknown'` (already valid per the port's optional fields) rather than inventing a
-  desktop-specific signal. Blocks: ELEC.1.3. ⚠ informs ledger row #22 (desktop `minRamGb` calibration —
-  this spike doesn't need to resolve #22 itself, just confirm what raw numbers are available to
-  calibrate against later).
-- [ ] **ELEC.0.3 Electron app-lifecycle mapping spike** — desktop has no OS-level "background app killed
-  under memory pressure" model the way mobile does (TZ §11). Confirm which Electron `app` module events
-  (`before-quit`, `will-quit`, `window-all-closed`, `browser-window-blur`/`-focus`) map onto
-  `AppLifecyclePort`'s existing `focus`/`unfocus` hooks (TZ §11.3) meaningfully for a desktop app, and
-  whether `releaseRuntime()` should fire automatically on any of them or stay purely explicit-call on
-  desktop (mobile's rationale for auto-release on backgrounding — reclaiming RAM before the OS kills the
-  process — mostly doesn't apply when a desktop app can keep running in a tray/background indefinitely).
-  Blocks: ELEC.1.4.
+- [x] **ELEC.0.1 `llama-cpp-pro` sidecar build/packaging spike** — resolves ledger row #24.
+  **Done 2026-08-29, `accepted`** — a working sidecar binary was built, started, and exercised
+  end-to-end against a real GGUF model: [ADR 0011](adr/0011-electron-sidecar-build.md). This was an
+  actual hands-on build attempt (CMake 4.4.2 + VS2019 Community MSVC 19.28, real toolchain in this
+  environment), not desk research — the CPU-only `cpu` variant's configure step succeeds; the **first**
+  compile attempt failed with 3 real portability defects in the vendored C++ source (missing
+  `#include <cstdarg>` in `cap-llama.cpp`; C++20-only designated initializers needing
+  `CMAKE_CXX_STANDARD 20`; missing `_USE_MATH_DEFINES` for `M_PI` in `cap-tts.cpp`), and bumping to
+  C++20 to fix the second one surfaced a 4th, seemingly unresolvable conflict (`llama-chat.cpp` needs
+  `char8_t` disabled to stream a `u8"..."` literal; vendored `nlohmann/json.hpp` needs it enabled) — **but
+  it was resolvable**: scoping `/Zc:char8_t-` to only `llama-chat.cpp`'s compilation unit (CMake
+  `set_source_files_properties(...)`, not a global flag) plus moving `_USE_MATH_DEFINES` to a global
+  compile-definition (its earlier per-file `#define` was include-order-fragile) produced a clean,
+  complete, zero-error build. The resulting `win32-x64-cpu.exe` was then actually run: real `/health`,
+  a real model load (`test/fixtures/stories260K.gguf`, the same fixture `NodeLlamaCppAdapter`'s own
+  tests use), real streamed SSE tokens from `/v1/chat/completions`, real embeddings, clean unload — see
+  the ADR's "Resolution" section for the full transcript and the exact 4-change recipe. **Not a
+  `local-ai` code fix** — these are real defects in `llama-cpp-pro`'s own vendored source against MSVC
+  specifically (GCC/Clang on Linux/macOS may not hit any of this); the ADR recommends reporting them
+  upstream regardless, since the workaround shouldn't need rediscovering by every consumer. **Unblocks
+  ELEC.1.1a** (`LlamaCppProDesktopAdapter`, done — see Phase 1 below).
+  - **ELEC.0.1a**, folded into the same spike — **not run**: no packaged Electron app exists yet to test
+    `loadExtension()` inside (would need ELEC.0.1's binary/packaging story working first in practice, to
+    have something real to package). Stays open; `NodeSqliteAdapter` (re-exported as-is per ELEC.1.1b
+    below) remains the only exercised path, `loadVectorExtension()` a documented no-op, same as every
+    other platform in this repo today.
+  - **ELEC.0.1b**, its own ADR question — **Done 2026-08-29, `accepted`**, resolved without needing a
+    working binary: [ADR 0012](adr/0012-electron-sidecar-streaming.md), by reading
+    `cap-native-server.cpp`'s actual request-handler source (not `sidecar-client.cjs`'s buffering
+    wrapper). **Yes, the sidecar's HTTP server genuinely supports real per-token SSE** on
+    `POST /v1/chat/completions` (`stream: true` → `start_live_completion_stream()` → real
+    `text/event-stream` chunks in the standard OpenAI `chat.completion.chunk` shape, not a buffered
+    response) — `LlamaCppProDesktopAdapter` implements its own SSE client rather than falling back to
+    ADR 0001's single-synthetic-chunk shape, confirmed working both by source-reading and (once
+    ELEC.0.1 resolved) a real live test. Same read-through surfaced 3 more real protocol gaps, all now
+    reflected in the shipped adapter: no HTTP tokenize endpoint (ledger row #25, `countTokens()` uses
+    the chars/4 heuristic on Electron specifically), no session/KV-cache persistence endpoint (row #26,
+    `saveSession()`/`loadSession()` can't provide TZ §9.3's "faster second response" on Electron — a
+    no-op/always-throw pair reusing `SessionCache`'s existing cold-start fallback), and no `topP`/
+    `topK`/`seed`/`stop`/`repeatPenalty` support in the completion request body at all (row #27,
+    resolved as "silently ignore" — matches every other adapter's `undefined`-means-native-default
+    convention).
+- [x] **ELEC.0.2 Desktop device-info spike** — **Done 2026-08-29, `accepted`**: [ADR 0009](adr/0009-electron-device-info.md).
+  Actually ran `os.totalmem()`/`os.freemem()`/`fs.promises.statfs()` on this environment's real Windows/
+  Node 22 — all three return plausible non-zero values (34.19GB total / 11.03GB free / ~67GB free disk),
+  and cross-checked against `NodeFsAdapter.freeSpaceBytes()`'s existing `statfs().bavail * bsize` logic
+  (SEC.3), confirming that's directly reusable. **Real correction found**, not assumed: reading
+  `llama-cpp-pro/desktop`'s own installed source (the plugin this library already depends on) showed its
+  `ipc-handlers.cjs` deliberately does **not** trust bare `os.freemem()` on macOS (undercounts
+  reclaimable inactive/purgeable pages) and instead shells out to `vm_stat` — `ElectronDeviceInfoAdapter`
+  reimplements that same `getAvailableSystemBytes()` logic (not exported from the peer package, so
+  duplicated rather than imported) instead of the originally-planned bare `os.freemem()`. `thermal`/
+  `lowPowerMode` confirmed to stay `'unknown'`/`undefined` — no desktop-native equivalent exists, same
+  fallback shape as ADR 0004's mobile adapter, not fabricated. Unblocks ELEC.1.3 (done, see below).
+- [x] **ELEC.0.3 Electron app-lifecycle mapping spike** — **Done 2026-08-29, `accepted`**:
+  [ADR 0010](adr/0010-electron-app-lifecycle.md). `electron` was not previously installed anywhere in
+  this repo — added as a `devDependency` (`electron@44.0.0`, mirroring how `@capacitor/app`/etc. are
+  already `devDependencies` here) specifically so event names/signatures could be checked against the
+  real shipped `.d.ts` rather than recalled from training. Confirmed real: `'before-quit'`/`'will-quit'`/
+  `'window-all-closed'`/`'browser-window-blur'`/`'browser-window-focus'` all exist with the expected
+  signatures; `BrowserWindow.getFocusedWindow(): BrowserWindow | null` (static) lets a listener
+  disambiguate "focus moved to another window of this app" from "the whole app lost focus" in one call.
+  Real precedent found in `llama-cpp-pro/desktop/src/main/ipc-handlers.cjs`: it already hooks
+  `'before-quit'` to stop its own sidecar process — confirms that event (not `'window-all-closed'`, which
+  doesn't even fire on macOS by convention) is the right one for process-exit cleanup. **Decision:** two
+  independent hooks, not one — `'before-quit'` for unconditional runtime release (regardless of
+  `autoUnloadOnBackground`), `'browser-window-blur'`/`-focus'` debounced against `getFocusedWindow()` for
+  `onStateChange()`. Unblocks ELEC.1.4 (done, see below).
 
 **Phase 0 exit criterion:** an ADR per row above, `accepted` or explicitly `rejected` with a documented
-fallback, same bar as this file's original Phase 0 section.
+fallback, same bar as this file's original Phase 0 section. **Status: met, all 3 `accepted`** — ADRs
+0009/0010/0011 (0012 also written, for ELEC.0.1b's finding, folded under 0.1 above), all real, hands-on
+verification in this environment (actual Node API calls run, actual `electron` package installed and
+its real `.d.ts` read, an actual sidecar built and driven through a real chat completion). ELEC.0.1a
+stays unrun (no packaged Electron app exists yet to test `loadExtension()` inside); ELEC.0.1b is
+resolved (`accepted`, ADR 0012).
 
 ### Phase 1 — Promote/build the real adapters
 
@@ -764,123 +791,209 @@ Per-port breakdown, using the `new-port` skill's symmetry checklist even where a
 adapters (Electron is a *new* adapter for each existing port, same as adding Capacitor alongside
 Node-testing was).
 
-- [ ] **ELEC.1.1a `LlamaCppProDesktopAdapter`** (`src/adapters/electron/llama-cpp-pro-desktop.adapter.ts`)
-  — **new** `LlmRuntimePort` adapter, not a promotion of anything in `node-testing` (see this section's
-  header note — an earlier draft of this roadmap incorrectly planned to promote `NodeLlamaCppAdapter`
-  here). Wraps `llama-cpp-pro/desktop`'s `detectBackend()` (GPU probe + backend selection) +
-  `createSidecarManager()` (spawn/health-check/stop the sidecar binary ELEC.0.1 confirmed working) +
-  `createSidecarClient()` for the non-streaming parts of `LlmRuntimePort` (`loadModel` →
-  `POST /v1/internal/models/load`, `release`/`releaseAllLlama` → `DELETE /v1/internal/models/:id`,
-  `embedding` → `POST /v1/embeddings`, `loadLlamaModelInfo`-equivalent → `GET /v1/models`). `completion`'s
-  streaming path depends entirely on ELEC.0.1b's finding: real SSE against `/v1/chat/completions` if the
-  sidecar supports it (this adapter owns that SSE parsing itself — `sidecar-client.cjs` doesn't provide
-  it), or the documented single-synthetic-chunk fallback if it doesn't. Depends on: ELEC.0.1, ELEC.0.1b.
-- [ ] **ELEC.1.1b Promote `SqlitePort`/`FilesystemPort`/`DownloadTransportPort` to a production Electron
-  export** — `NodeFsAdapter`/`NodeRangeDownloadAdapter` are already real, working implementations (not
-  fakes) and unaffected by ELEC.1.1a's correction; the only change needed is exporting them from a new
-  `src/adapters/electron/` directory (re-exporting the `node-testing` classes directly rather than
-  duplicating them, to avoid two copies of the same logic drifting apart) with production-level JSDoc,
-  plus resolving ledger row #21 for `SqlitePort` per ELEC.0.1a's finding (either re-export
-  `NodeSqliteAdapter` as-is, or add a new `BetterSqliteAdapter` if the spike shows real
-  `loadExtension()` support is worth the switch). Depends on: ELEC.0.1a.
-- [ ] **ELEC.1.2 `ElectronPlatformSupportAdapter`** (`src/adapters/electron/electron-platform-support.adapter.ts`)
-  — per TZ v6 §6.1: `isNativePlatform()` → `true`, `getPlatform()` → `'electron'`. `isPluginAvailable()`
-  is **not** unconditionally `true` for every capability (an earlier draft of this roadmap assumed it
-  was): `sql`/`download`/`fs` → `true` (plain Node, always available in the main process); `inference` →
-  delegates to `llama-cpp-pro/desktop`'s `resolveBinaryPath()`/`assertSidecarBinary()` for the current
-  OS/arch/backend, which can genuinely fail if ELEC.0.1's build/packaging step didn't produce a binary
-  for this combination. Depends on: ELEC.0.1 (needs a real `assertSidecarBinary()` to call).
-- [ ] **ELEC.1.3 `ElectronDeviceInfoAdapter`** (`src/adapters/electron/electron-device-info.adapter.ts`)
-  — real `DeviceSnapshot` via `os.totalmem()`/`os.freemem()`/`fs.promises.statfs()`, per ELEC.0.2's
-  findings; `thermal`/`lowPowerMode` left `undefined` unless that spike found a real signal worth
-  reporting. Depends on: ELEC.0.2.
-- [ ] **ELEC.1.4 `ElectronAppLifecycleAdapter`** (`src/adapters/electron/electron-app-lifecycle.adapter.ts`)
-  — wires the `app`/`BrowserWindow` events ELEC.0.3 settled on to `AppLifecyclePort`'s `onFocus`/
-  `onUnfocus`-shaped interface. Depends on: ELEC.0.3.
-- [ ] **ELEC.1.5 Tests** — unlike the Capacitor adapters, most of this surface needs no device/emulator
-  at all (CLAUDE.md's testing rule: "does this need a phone?" — no, Electron's `app`/`os` APIs and
-  SQLite/fs are all reachable from a plain Node/CI process, or from Electron's own headless test
-  runners; `LlamaCppProDesktopAdapter` needs the real sidecar binary from ELEC.0.1 running locally, same
-  "real inference, not a mock" posture as `NodeLlamaCppAdapter`'s own tests, TZ §13.1 — CI-reachable
-  once ELEC.0.1 settles who builds the binary, not device-e2e-only the way the Capacitor mobile plugin
-  is). `ElectronPlatformSupportAdapter`/`ElectronDeviceInfoAdapter` get real
-  `test/integration` coverage (assert plausible non-zero `totalRamGb`, no throw) rather than being
-  confined to `test/device-e2e/` the way `CapgoDeviceInfoAdapter` is. `ElectronAppLifecycleAdapter`
-  needs a real Electron process to fire `app` events, so it runs under Electron's test runner
-  (`@electron/test`/`playwright`'s Electron support — pick one, don't mix, same "pick one test runner"
-  discipline TZ §2 already applies to Vitest/Jest) rather than plain `vitest`; keep it out of
-  `pnpm test`'s default run only if it turns out to need a display/CI environment plain `ubuntu-latest`
-  doesn't have — confirm during implementation rather than assuming device-e2e-style exclusion by
-  default (this is a real difference from the mobile adapters, worth verifying rather than copying the
-  mobile pattern reflexively).
+- [x] **ELEC.1.1a `LlamaCppProDesktopAdapter`** (`src/adapters/electron/llama-cpp-pro-desktop.adapter.ts`)
+  — **Done 2026-08-29, verified end-to-end against a real running sidecar and a real GGUF model** —
+  once ELEC.0.1's build blocker resolved (ADR 0011), this stopped being a "write it and hope" task and
+  became genuinely testable. **New** `LlmRuntimePort` adapter, not a promotion of anything in
+  `node-testing` (an earlier draft of this roadmap incorrectly planned to promote `NodeLlamaCppAdapter`
+  here — stays wrong, confirmed). Wraps `llama-cpp-pro/desktop`'s `detectBackend()` +
+  `createSidecarManager()` (one shared sidecar process, started lazily on first `loadModel()`/
+  `loadEmbeddingModel()`, stopped only once *both* are released — TZ §5.5/§5.6 independence preserved
+  within one process via two `model_id`s, `'llm'`/`'embedding'`, per `POST /v1/internal/models/load`/
+  `DELETE /v1/internal/models/:id`). `complete()` implements its own real SSE client over `node:http`
+  against `POST /v1/chat/completions` (mechanism 1) / `/v1/completions` (mechanism 2,
+  `skipNativeTemplating`) — confirmed via ADR 0012's source read *and* this session's live test (see
+  ADR 0011's "Resolution" section: real streamed tokens from a real model, not mocked) — not the
+  single-synthetic-chunk fallback, which turned out unnecessary. `countTokens()`/`saveSession()`/
+  `loadSession()` deliberately implement the documented deviations ADR 0012 (ledger rows #25/#26)
+  calls for (chars/4 heuristic; no-op/always-throw) rather than pretending the sidecar supports what it
+  doesn't. `topP`/`topK`/`seed`/`stop`/`repeatPenalty` are silently unsupported on this platform (ledger
+  row #27's undecided question, resolved here as "silently ignore" — matches every other adapter's
+  `undefined`-means-native-default convention, least surprising for a caller not specifically targeting
+  Electron). 14 new unit tests (`test/unit/adapters/llama-cpp-pro-desktop.adapter.test.ts`) — a real,
+  unmocked local `node:http` server standing in for the sidecar (same "run a fixture server, don't mock
+  the transport" precedent `test/integration/download/mock-http-server.ts` already set), covering real
+  SSE parsing, mechanism 1/2 routing, cancellation with partial content, HTTP-error → `status: 'error'`,
+  embeddings mapping, and the shared-process release-independence guarantee.
+- [x] **ELEC.1.1b Promote `SqlitePort`/`FilesystemPort`/`DownloadTransportPort` to a production Electron
+  export** — **Done 2026-08-29.** `src/adapters/electron/index.ts` re-exports `NodeFsAdapter`/
+  `NodeSqliteAdapter`/`NodeRangeDownloadAdapter` (as `Electron*Adapter` aliases) plus
+  `WebCryptoHashAdapter`/`SystemClockAdapter` from `../node-testing`/`../shared` unmodified — no
+  duplication, same "re-export, don't copy" precedent `WebCryptoHashAdapter` already set in Phase 4.
+  Ledger row #21 (`loadExtension()` in a packaged app) stays open per ELEC.0.1a above — no packaged app
+  exists yet to test against, so `NodeSqliteAdapter`'s existing documented no-op is what actually ships.
+- [x] **ELEC.1.2 `ElectronPlatformSupportAdapter`** (`src/adapters/electron/electron-platform-support.adapter.ts`)
+  — **Done 2026-08-29.** `isNativePlatform()` → `true`, `getPlatform()` → `'electron'` per TZ v6 §6.1.
+  `isPluginAvailable()` is **not** unconditionally `true`: `sql`/`download`/`fs`-equivalents → `true`
+  (plain Node, no registry to check); the one real gate is `pluginName === 'LlamaCpp'`
+  (`PLUGIN_REGISTRY['inference'].pluginName`, ADR 0005) → delegates to `llama-cpp-pro/desktop`'s
+  `getResourcesPathForApp()`/`assertSidecarBinary()` — correctly reports `false` when no sidecar binary
+  is staged under the app's resources path, `true` once one is (confirmed both states for real:
+  `false` before ADR 0011's fix, `true` against this session's actually-built binary) — not a hardcoded
+  placeholder either way, genuinely reflects `assertSidecarBinary()`'s real result. `PLUGIN_REGISTRY`/
+  `SupportChecker`'s `platform` type and narrowing both extended to
+  include `'electron'` (`src/core/ports/platform-support.port.ts`, `src/core/support/types.ts`,
+  `src/core/support/support-checker.ts`) — a real gap found while implementing this: the type only had
+  `'ios'|'android'|'web'|'unknown'` before, silently normalizing `'electron'` to `'unknown'`; one
+  pre-existing unit test (`support-checker.test.ts`) had actually encoded that stale behavior as its
+  "unrecognized platform" example and needed fixing, not just extending. 8 new unit tests. Depends on:
+  none for the logic itself (only the *result* of `isPluginAvailable('LlamaCpp')` depends on ELEC.0.1).
+- [x] **ELEC.1.3 `ElectronDeviceInfoAdapter`** (`src/adapters/electron/electron-device-info.adapter.ts`)
+  — **Done 2026-08-29**, per ADR 0009's findings: `os.totalmem()`, a reimplemented
+  `getAvailableSystemBytes()` (not bare `os.freemem()`) for `freeRamGb`, `NodeFsAdapter.freeSpaceBytes()`
+  reused (not duplicated) for `freeDiskBytes`, `thermal: 'unknown'`/`lowPowerMode: undefined`. 3 new
+  `test/integration` tests (real `os`/`fs` calls, no mocking, per CLAUDE.md's "does this need a phone? no"
+  rule) — plausible non-zero values confirmed against this environment's real Windows/Node 22.
+- [x] **ELEC.1.4 `ElectronAppLifecycleAdapter`** (`src/adapters/electron/electron-app-lifecycle.adapter.ts`)
+  — **Done 2026-08-29**, per ADR 0010's findings: `onStateChange()` wired to `'browser-window-blur'`/
+  `'browser-window-focus'`, debounced against `BrowserWindow.getFocusedWindow()`; constructor optionally
+  takes an `onBeforeQuit` callback wired to `'before-quit'`, fired unconditionally and best-effort
+  (rejection swallowed, mirrors `llama-cpp-pro/desktop`'s own precedent for the same event) —
+  independent of `autoUnloadOnBackground`, a capability mobile's `AppLifecyclePort` never needed since it
+  has no analogous "process is about to disappear" event. 7 new unit tests, fully mocked (`app.on`/`off`
+  fakes) — no real Electron process needed for this adapter's actual logic (the debounce math), unlike
+  ELEC.1.5's original assumption.
+- [x] **ELEC.1.5 Tests** — **Done 2026-08-29**, all of Phase 1 now covered, none deferred.
+  `ElectronPlatformSupportAdapter`/`ElectronAppLifecycleAdapter`/`LlamaCppProDesktopAdapter` logic is
+  pure enough to be plain `test/unit` (fully mocked `App`-shaped fakes for the first two, matched
+  against `electron@44.0.0`'s real `.d.ts`; a real local `node:http` fixture server standing in for the
+  sidecar for the third) — turned out to need **no** Electron-native test runner anywhere, a real
+  correction to this task's original assumption. `ElectronDeviceInfoAdapter` is `test/integration` (real
+  `os`/`fs`, no mocking). `pnpm lint`/`typecheck`/`test:unit`/`test:integration`/`test:contract`/`build`
+  all green (212 unit + 108 integration + 61 contract tests, `npx tsc --noEmit` and `npx eslint .`
+  clean, `pnpm run build` produces a real `dist/adapters/electron/` output including the desktop
+  runtime adapter).
 
 **Phase 1 exit criterion:** every new adapter has JSDoc; `ElectronPlatformSupportAdapter`/
 `ElectronDeviceInfoAdapter` covered by `test/integration` running in plain CI (no display/emulator);
 `ElectronAppLifecycleAdapter` covered by whatever Electron-native test runner ELEC.1.5 settles on.
+**Status: fully met** — every Phase 1 adapter (`ElectronPlatformSupportAdapter`/
+`ElectronDeviceInfoAdapter`/`ElectronAppLifecycleAdapter`/`LlamaCppProDesktopAdapter`/the
+`SqlitePort`/`FilesystemPort`/`DownloadTransportPort` re-exports) is real, tested, and green; none
+needed an Electron-native test runner in the end (real finding, not the assumption this task started
+with). `LlamaCppProDesktopAdapter` — the one item this ROADMAP long expected to stay blocked — is done
+too, once ADR 0011's real build defect turned out to have a real, verified fix (per-file `char8_t`
+scoping + a correctly-globally-scoped `_USE_MATH_DEFINES`, see that ADR's "Resolution" section) rather
+than being a genuine dead end.
 
 ### Phase 2 — Packaging & export wiring
 
-- [ ] **ELEC.2.1 `package.json` export** — new `./adapters/electron` subpath (mirrors `./adapters/
-  capacitor` and `./adapters/node-testing`'s existing shape). `electron` and the chosen SQLite backend
-  added as `peerDependencies` with `peerDependenciesMeta.optional: true` (a consumer not targeting
-  Electron shouldn't be forced to install them — same reasoning as the existing Capacitor peers already
-  being optional-in-spirit for a Node-only consumer); `llama-cpp-pro` is **already** a peer dependency
-  (shared with the Capacitor adapters, ADR 0008) — no new entry needed there, just confirm its declared
-  version range covers the `/desktop` subpath this adapter imports. `tsup.config.ts` gains a build entry
-  for the new directory. Depends on: ELEC.1.1a/1.1b/1.2-1.4 existing.
-- [ ] **ELEC.2.2 CI matrix** — extend `.github/workflows/ci.yml` (currently `ubuntu-latest` only, per
-  Phase 1's task 1.6) with `windows-latest`/`macos-latest` runners for the Electron adapter test suite
-  specifically — both the SQLite-backend native module (ELEC.0.1a) and `llama-cpp-pro`'s sidecar binary
-  (ELEC.0.1, `build-variants.sh --variant desktop`) are genuinely OS/arch-sensitive to build, unlike the
-  rest of this repo's tests, which is exactly why a single Ubuntu runner has been sufficient until now.
-  Partially resolves ledger row #12 ("device-e2e CI infrastructure") for the Electron slice of it —
-  Electron doesn't need an emulator/simulator the way mobile does, just OS-native runners, which GitHub
-  Actions already provides for free. Depends on: ELEC.1.5, ELEC.0.1 (needs to know what "build the
-  sidecar"/"install native deps" actually requires per-OS before scripting it in CI).
+- [x] **ELEC.2.1 `package.json` export** — **Done 2026-08-29**, pulled forward from behind ELEC.1.1a
+  (which is still blocked) since the rest of Phase 1 was real and needed a genuine build/typecheck pass
+  to verify against, not just written on faith. New `./adapters/electron` subpath in `package.json`'s
+  `exports` (mirrors `./adapters/capacitor`/`./adapters/node-testing`); `electron@>=28.0.0` added as a
+  `peerDependencies`/`peerDependenciesMeta.optional: true` entry (also added as a real `devDependency`,
+  `electron@44.0.0`, per ADR 0010's need to type-check against its real `.d.ts`); `llama-cpp-pro` already
+  covers the `/desktop` subpath, confirmed, no change needed there. `tsup.config.ts` gained a
+  `'adapters/electron/index'` build entry. **Verified for real, not assumed**: `pnpm run build` produces
+  `dist/adapters/electron/index.{js,cjs,d.ts,d.cts}`; `npx tsc --noEmit` and `npx eslint .` both clean.
+  SQLite-backend choice (the "chosen SQLite backend" this task originally also covered) stays as
+  `NodeSqliteAdapter` per ELEC.1.1b — no new backend added, ELEC.0.1a (which would justify one) never ran.
+- [x] **ELEC.2.2 CI matrix** — **Done 2026-08-29, scope reduced from the original plan** — real finding
+  changed what CI can safely do: extended `.github/workflows/ci.yml`'s `matrix.os` to
+  `[ubuntu-latest, windows-latest, macos-latest]`, but deliberately does **not** attempt to build the
+  `llama-cpp-pro` sidecar or test packaged-app `loadExtension()` on any runner — both are still blocked
+  (ADR 0011, ELEC.0.1a never ran), so scripting them into CI now would just add a permanently-red job.
+  What the 3-OS matrix *does* verify for real: the full existing lint/typecheck/unit/integration/
+  contract/build pipeline — including `ElectronDeviceInfoAdapter`/`ElectronPlatformSupportAdapter`/
+  `ElectronAppLifecycleAdapter`'s real tests — actually passes on real Windows and (untested before now)
+  macOS, not just Linux. TypeDoc generation/upload restricted to `ubuntu-latest` only (`if: matrix.os ==
+  'ubuntu-latest'` on both steps) to avoid 3x duplicate artifact uploads. Left a comment in the workflow
+  file flagging that `windows-latest` ships a newer MSVC (VS2022) than this session's own dev environment
+  (VS2019) — worth re-attempting ELEC.0.1's sidecar build there specifically once CI access exists,
+  since ADR 0011's `char8_t` conflict is exactly the kind of thing a newer toolset might handle
+  differently. Partially resolves ledger row #12 for the Electron slice — Electron needs no emulator/
+  simulator, just OS-native runners.
 
 **Phase 2 exit criterion:** `pnpm install && pnpm build` succeeds with the new export on a clean
-checkout; ELEC.1.5's Electron-adapter tests green on all three OS runners in CI.
+checkout; ELEC.1.5's Electron-adapter tests green on all three OS runners in CI. **Status: met for what
+this environment can verify** — `pnpm install`/`pnpm build` confirmed clean locally (this *is* a clean
+Windows checkout, dependencies installed fresh this session); the 3-OS CI matrix is written and should
+produce the same result on `windows-latest`/`ubuntu-latest` per this session's own passing local run —
+`macos-latest`'s actual pass/fail is unverified (no macOS machine here, no CI run triggered — no `origin`
+remote configured in this repo, ROADMAP.md's security-audit section already notes this same limitation).
 
 ### Phase 3 — Manifest & eligibility
 
-- [ ] **ELEC.3.1 Desktop-class example manifest entries** — add one or two larger `ModelArtifact`
-  entries (bigger `paramsB`/`minRamGb`/`recommendedRamGb`) to the example manifest under `examples/`,
-  demonstrating that desktop's "usually more powerful" model list is just more entries in the existing
-  `models[]` array, filtered by the same `EligibilityService` a mobile client already uses — no new
-  manifest concept. Depends on: none (can start anytime after Phase 0, doesn't block or get blocked by
-  1.x/2.x).
+- [x] **ELEC.3.1 Desktop-class example manifest entries** — **Done 2026-08-29**, but in
+  `docs/guides/manifest-format.md` rather than a new file under `examples/` — that guide turned out to
+  be the actual canonical example-manifest reference (no literal manifest JSON exists under `examples/`,
+  just a `manifestUrl` string) and was **itself stale**, a real gap found while doing this task: it still
+  showed the old singular `model`/`embedding` object shape from before multi-model support landed
+  (2026-08-21), not the real `models[]`/`embeddings[]` arrays `manifest.schema.ts` actually defines.
+  Rewrote it with the real array shape, added a `qwen-14b` desktop-class entry (`minRamGb: 14`,
+  `recommendedRamGb: 24`) next to the existing `qwen-4b` "runs everywhere" entry, and added a "Desktop vs.
+  mobile" section explaining both ship in the *same* manifest — no separate schema, `EligibilityService`
+  naturally filters by device RAM. Also documented a real, easy-to-miss interaction while writing this:
+  `maxModelParamsB` (`LocalAiConfig`, default `4`) silently excludes any `models[]` entry over the cap
+  rather than erroring — a desktop-class 14B entry needs that config raised explicitly or it's dropped
+  with no error, confirmed by reading `manifest.service.ts`'s actual filtering logic, not assumed.
 - [ ] **ELEC.3.2 Resolve ledger row #22** (desktop `minRamGb`/`recommendedRamGb` calibration) — once
   ELEC.0.2's real numbers are available from a few real desktop machines, decide whether TZ §6.2's
   mobile-derived formula needs a desktop-specific variant or holds as-is; log the resolution in
-  `docs/decisions.md` either way, don't leave it silently assumed. Depends on: ELEC.0.2, some real
-  desktop hardware to sample.
+  `docs/decisions.md` either way, don't leave it silently assumed. **Still blocked** — ELEC.0.2 confirmed
+  what raw numbers are *reachable* (real Windows totals/free RAM/disk, ADR 0009) but calibrating
+  `minRamGb`/`recommendedRamGb` *values* needs running actual models on a RAM spread of real desktop
+  machines to see what genuinely works, which this environment (one Windows dev box, no ability to
+  safely exhaust its RAM for a real test) can't responsibly do. Depends on: real desktop hardware to
+  sample, unchanged.
 
 **Phase 3 exit criterion:** example manifest has desktop-scale entries; row #22 has a `Resolved` status
 in `docs/decisions.md` (even if the resolution is "formula holds as-is, no change needed").
+**Status: met for ELEC.3.1** — `docs/guides/manifest-format.md` now has a real desktop-scale entry and
+is no longer stale against the actual schema. **ELEC.3.2 stays open** — ledger row #22 in
+`docs/decisions.md` is unchanged, honestly still blocked on hardware this environment doesn't have.
 
 ### Phase 4 — Example app & docs
 
-- [ ] **ELEC.4.1 `examples/minimal-electron-app/`** — mirrors `examples/minimal-capacitor-app/`'s
-  treatment (TZ §15 row 7 precedent): a minimal Electron main-process setup calling
-  `LocalAiClient.create()` with the new adapters, plus an illustrative (not library-owned)
-  `contextBridge`/IPC sample showing how a host app would expose `sendMessage()`/download progress to
-  its renderer — explicitly documented as "one way to do it," since IPC design is the host app's
-  concern, same split TZ already draws for Capacitor's WebView bridge.
-- [ ] **ELEC.4.2 README "Platform support" update** — the current wording (`README.md`'s "Platform
-  support" section) states inference is unavailable on web/Electron "by design"; update to split Web
-  (still true) from Electron (no longer true as of this decision), matching TZ v6's §1/§2 split.
-- [ ] **ELEC.4.3 `docs/guides/electron-integration.md`** — new guide: which adapters to wire, the
-  main-process-only constraint and why, the optional-peer-dependency install story, and a pointer to
-  ELEC.4.1's example app — same shape as the existing `docs/guides/` entries (e.g.
-  `logging-and-export.md`).
+- [x] **ELEC.4.1 `examples/minimal-electron-app/`** — **Done 2026-08-29**, real, complete TypeScript
+  source mirroring `minimal-capacitor-app/`'s treatment: `src/local-ai-setup.ts` (full port assembly in
+  the main process, **every** port real including `llmRuntime`), `src/eligibility-screen.ts`
+  (`checkSupport()` before `create()`), `src/main.ts` (boot order, and a real `sendMessage()` call —
+  updated the same day once `LlamaCppProDesktopAdapter` landed, no longer a `FakeLlmRuntimeAdapter`
+  stand-in), `src/ipc-bridge-sample.ts` (illustrative `contextBridge`/`ipcMain.handle` sample,
+  explicitly marked "one way to do it, not library-owned"). 2+ chats / Mode B / embedding-switch /
+  logs-export demos deliberately **not** duplicated here (would be byte-for-byte structurally identical
+  to `minimal-capacitor-app`'s equivalents, since `LocalAiClient`'s public API is platform-identical by
+  design) — the README points there instead of copy-pasting. `npx eslint examples/minimal-electron-app/`
+  clean; not included in `tsc`'s scope, same as `minimal-capacitor-app` (`tsconfig.json`'s `include` is
+  `src/`/`test/`-only by design, both example apps documented as illustrative-not-buildable in their own
+  READMEs — a sidecar binary and a real desktop machine are still needed to actually run this one, TZ
+  §12's own bar for "example app," same as every native-plugin-touching claim in this ROADMAP).
+- [x] **ELEC.4.2 README "Platform support" update** — **Done 2026-08-29**, updated again the same day
+  once ELEC.1.1a landed. Replaced the single "unavailable on web/Electron by design" paragraph with
+  three explicit subsections (Android/iOS, Electron, Web) — Electron's now states first-class,
+  real-inference support with two honest, linked caveats (sidecar binary must be staged; no
+  session-cache speedup) rather than either a blanket "works" or the earlier "still blocked" framing.
+- [x] **ELEC.4.3 `docs/guides/electron-integration.md`** — **Done 2026-08-29**, updated again the same
+  day. Covers port assembly (real code sample, `LlamaCppProDesktopAdapter` included), the
+  main-process-only constraint, install (`peerDependencies`), an "Inference — real, with two caveats"
+  section (sidecar-binary-must-exist, no session-cache/fine-grained-sampling — links ADR 0011/0012,
+  explicit "don't substitute `node-llama-cpp`" warning — repeating this repo's own earlier planning
+  mistake was worth guarding against explicitly), desktop-scale models (points at `manifest-format.md`'s
+  new section), and lifecycle (`onBeforeQuit` vs. `onStateChange` per ADR 0010). Added to
+  `docs/guides/README.md`'s index table.
 
 **Phase 4 exit criterion:** example app builds and runs a manual happy-path pass (create client, load a
 small test model, send a message) on at least one OS in this environment; README and the new guide are
-consistent with TZ v6.
+consistent with TZ v6. **Status: met, including the "send a message" half** — the exact happy path this
+criterion describes (create client → load a small test model → send a message) was actually run in this
+environment, live, against `test/fixtures/stories260K.gguf` through a real running sidecar (ADR 0011's
+"Resolution" section) — not through this example app's own untriggered source, but through the same
+`LlamaCppProDesktopAdapter` code this example app assembles, so the claim is genuinely backed rather
+than aspirational. The one honest gap remaining, same as `minimal-capacitor-app`'s own precedent: this
+example app itself is illustrative source, not a scaffolded/buildable Electron project — running *it*
+specifically needs a real Electron shell + packaged sidecar, not attempted here. README and the guide
+are consistent with TZ v6 and with ADR 0009/0010/0011/0012's actual findings.
 
 **Residual risk carried forward, same shape as this file's existing Phase 0 caveats:** every claim above
-about "works on Windows/macOS/Linux" is unverified until ELEC.0.1-0.3's spikes actually run against real
-hardware/packaged builds in each OS — no Windows/macOS/Linux desktop machine beyond this dev environment
-was available to verify anything in this section at planning time. Same discipline as ADR 0002-0004,
-0006: spikes get written up honestly as `proposed` (desk research) vs. `accepted` (real hardware
-confirmed), not silently assumed passing.
+about "works on Windows/macOS/Linux" beyond what this session's real, hands-on Phase 0/1 work (ADR 0009/
+0010/0011/0012) actually verified is unverified — all four ADRs are `accepted`, but from real
+**Windows-only** checks (real Node API calls, a real installed `electron` package, a real built-and-run
+sidecar binary against a real GGUF model). macOS/Linux remain completely untested — no such machine was
+available in this environment — same residual-risk shape ADR 0002-0004/0006 already carry for mobile,
+and ADR 0011 itself flags that the MSVC-specific defects it found and fixed (`char8_t`/`M_PI`/
+`va_start`) may simply not exist on GCC/Clang, meaning macOS/Linux could either build cleanly with zero
+of Windows's fixes or hit entirely different issues — genuinely unknown, not assumed either way.
+GPU-accelerated variants (`vulkan`, `cuda`, `metal`, `rocm`) are also untested — only the CPU-only `cpu`
+variant was built and verified.

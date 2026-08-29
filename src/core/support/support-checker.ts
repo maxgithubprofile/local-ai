@@ -34,7 +34,9 @@ export class SupportChecker {
     const isNative = this.platformSupport.isNativePlatform();
     const rawPlatform = this.platformSupport.getPlatform();
     const platform: SupportReport['platform'] =
-      rawPlatform === 'ios' || rawPlatform === 'android' || rawPlatform === 'web' ? rawPlatform : 'unknown';
+      rawPlatform === 'ios' || rawPlatform === 'android' || rawPlatform === 'web' || rawPlatform === 'electron'
+        ? rawPlatform
+        : 'unknown';
 
     const capabilities = {} as Record<Capability, boolean>;
     const missingPlugins: SupportReport['missingPlugins'] = [];
