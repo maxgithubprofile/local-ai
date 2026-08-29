@@ -7,7 +7,7 @@ npm install local-ai
 # plus whichever native plugins your platform adapter set needs, e.g.:
 npm install @capacitor/core @capacitor/app @capacitor/filesystem \
   @capacitor-community/sqlite @capgo/capacitor-downloader @capgo/capacitor-device-info \
-  llama-cpp-capacitor
+  llama-cpp-pro
 ```
 
 `local-ai` never bundles a default model — you point it at a manifest URL you (or your backend)

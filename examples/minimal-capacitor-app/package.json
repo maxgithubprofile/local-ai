@@ -11,6 +11,6 @@
     "@capacitor-community/sqlite": "^8.0.0",
     "@capgo/capacitor-downloader": "^8.0.0",
     "@capgo/capacitor-device-info": "^8.0.0",
-    "llama-cpp-capacitor": "^0.1.5"
+    "llama-cpp-pro": "^0.2.4"
   }
 }

@@ -10,7 +10,7 @@ a decision.
 | 1 | npm package name/scope + library license (interacts with MPL-2.0 downloader dep) | Open | Bootstrap placeholder: `package.json` name `local-ai`, `license: "UNLICENSED"`, `private: true` | — | — |
 | 2 | Concrete default model + embedding (HF repo, commit SHA, embedding URL, `compatibleModelIds`, calibrated `minRamGb`/`recommendedRamGb`) | Open | — | — | — |
 | 3 | Embedding file hosting (own CDN/server) + `@capgo/capacitor-downloader` header compatibility | Open | — | — | — |
-| 4 | Whether to actively support degraded Web/Electron at all | Open | — | — | — |
+| 4 | Whether to actively support degraded Web/Electron at all | Resolved | **Electron desktop (Windows/macOS/Linux) — yes, as a first-class, non-degraded target** (not the "degraded" framing the question assumed). Browser Web (non-Electron) stays degraded/unresolved, unchanged. See "Electron desktop support" section below for the full writeup and `ROADMAP.md`'s "Electron desktop support" for the task breakdown. | 2026-08-29 | — |
 | 5 | Whether `VectorStore`/`sqlite-vec` is mandatory for v1 | Open | — | — | — |
 | 6 | Chat/message count or size limits | Open | — | — | — |
 | 7 | Message branching (regenerate/edit-and-resubmit) in v1 | Open | User scoped Phase 8's 2026-08-11 request to exclude this — most invasive of the Phase 8 set (schema + `getMessages()`/`sendMessage()` semantics change), stays deferred until asked for explicitly | 2026-08-11 | — |
@@ -28,6 +28,10 @@ a decision.
 | 18 | Whether `'cancelled'`/`'error'` messages show in UI by default | Open | N/A to the library (consumer-app UI decision) — documented as an integration-guide example only | — | — |
 | 19 | Is `LlmRuntimePort.countTokens()` mandatory, or is a heuristic acceptable pre-Phase-4 | Resolved | Both real runtime adapters (`NodeLlamaCppAdapter`, `LlamaCppCapacitorAdapter`) implement `countTokens()` for real via the underlying plugin's own tokenizer (`model.tokenize()`/`context.tokenize()`) — no heuristic needed once a model is loaded. A chars/4-style heuristic remains only as Phase 5's context-policy fallback for the brief window before any model is loaded (TZ §9.7) | 2026-08-10 | [0001](adr/0001-llama-cpp-capacitor-api.md) |
 | 20 | A method to free storage by removing the currently-installed model/embedding **without** downloading a replacement (`switchModel()`/`switchEmbedding()` only delete the old file as a side effect of fetching a new one) | Open | Raised by external consumer feedback (`2026-08-11-local-ai-library-feedback.md` #6, from the Forta Chat integration) — realistic mobile scenario (user wants the 2.5GB back with no replacement in hand). Not implemented; see `ROADMAP.md`'s "External feedback backlog" section, task FB.5 | 2026-08-11 | — |
+| 21 | Electron's production `SqlitePort` backend — `better-sqlite3` (real `loadExtension()`, so `sqlite-vec`'s primary vector-search path may finally be viable without a mobile device) vs. reusing `node:sqlite` (already proven in this repo's own tests, but `loadExtension()` unavailable on the Node version this repo's dev container has — untested whether that's a Node-version gap or a `node:sqlite` API gap on the version Electron actually bundles) | Open | Pending `ROADMAP.md`'s Electron spike ELEC.0.1 | — | — |
+| 22 | Whether Electron desktop needs its own `minRamGb`/`recommendedRamGb` calibration distinct from TZ §6.2's formula, or the same mobile-derived formula (`minRamGb ≈ ceil(sizeGB × 1.5)`) still holds on desktop hardware/OS memory-management characteristics | Open | Pending real-world desktop eligibility data; not blocking — the formula still produces a usable (if uncalibrated) verdict either way | — | — |
+| 23 | Does `llama-cpp-pro`'s desktop sidecar HTTP server support `stream: true` SSE on `POST /v1/chat/completions` (needed for per-token `CompletionStream`)? Its own `sidecar-client.cjs` convenience wrapper buffers the full response and never streams — confirmed by reading the installed package, not assumed — so this is genuinely unknown, not just unimplemented | Open | Pending `ROADMAP.md`'s Electron spike ELEC.0.1b (read/test `cap-sidecar-main.cpp`'s HTTP handler directly) | — | — |
+| 24 | Where `llama-cpp-pro`'s desktop sidecar binaries (per OS/arch/GPU-backend variant) actually come from for a `local-ai` consumer — build from source at release time via the plugin's own `build-variants.sh --variant desktop` (real CI cost: CMake/CUDA/Vulkan/Metal/ROCm toolchains across three OSes), vendor prebuilt binaries, or push the build step onto the host Electron app | Open | Pending `ROADMAP.md`'s Electron spike ELEC.0.1 | — | — |
 
 ## How to resolve a row
 
@@ -921,3 +925,249 @@ most recently *recorded* (length-changed) samples' timestamps, rather than time 
 change — caused the loop to exit after just 2 samples once they happened to be >8s apart, even though
 generation was still running. Both are fixed in the anchored, cursor-based version now checked in;
 worth reading its doc comment before trusting a future variant of this kind of script.
+
+### Android `.so` compiled with `-DLM_GGML_CPU_GENERIC` — no NEON/dotprod kernels at all, likely the real reason `n_threads` tuning showed no win (2026-08-21)
+
+**Context:** User asked for an expected tok/s estimate for a Cubot P80 running Qwen3-4B Q4_K_M, then
+reported the real device shows ~1 tok/s — matching this ledger's own "ADR 0008 §7 device-verification"
+and "`n_threads` plumbed and device-measured" entries above (1.0–1.1 tok/s generation, both dated
+2026-08-20) almost exactly. Asked whether `local-ai` itself has a bottleneck; this is a source-level
+read of the actual Android native build (`node_modules/llama-cpp-pro`), not a guess.
+
+**Finding, confirmed by reading the vendored build, not measured fresh:**
+`android/src/main/CMakeLists.txt`'s `build_library_arm64()` compiles with
+`-march=armv8-a -mtune=cortex-a76 ... -DLM_GGML_CPU_GENERIC` (no `+dotprod`/`+i8mm`/`+fp16`), and its
+`SOURCE_FILES` list never includes anything under `cpp/ggml-cpu/arch/arm/` (`quants.c`, `repack.cpp`,
+`cpu-feats.cpp` — the real NEON/dotprod kernel implementations, confirmed present in the vendored
+source tree but simply not added to the CMake file list). `LM_GGML_CPU_GENERIC`
+(`cpp/ggml-cpu/arch-fallback.h`) is the flag that renames the portable scalar-C fallback functions
+(`lm_ggml_vec_dot_q4_K_q8_K`, `q6_K`, the repack gemv variants, …) into the primary symbols precisely
+*because* no arch-specific `.c`/`.cpp` is being linked to provide the real ones. Net effect: **every
+quantized matmul/GEMV on Android — the entire hot path for Q4_K_M decode — runs through the
+unvectorized scalar fallback, unconditionally, on every device this plugin ships to**, not just
+weak ones like the P80. This is commonly a 3–10× slowdown vs. a NEON-enabled build for this exact
+op mix, which is large enough to be the dominant factor rather than the P80's own weak
+Cortex-A73/A53 (no dotprod either way) or its narrow LPDDR4X bandwidth.
+
+**Why this reframes the 2026-08-20 `n_threads` entry above:** that pass found setting
+`runtimeTuning.threads: 4` explicitly changed nothing measurable, and logged two equally-unconfirmed
+explanations — native default already ≈4, or decode is memory-bandwidth-bound past a low core count.
+A third, not previously considered: if every thread is doing scalar (not SIMD) dot products, each
+thread's per-token work is already large enough that adding threads *should* still show some
+scaling (this isn't inherently bandwidth-bound at 4 cores on this class of device) — the fact it
+didn't move at all is itself mildly suspicious and worth re-testing once the SIMD path is restored,
+rather than concluding thread count is a dead end.
+
+**Also confirmed, secondary/orthogonal findings from the same read:**
+- `LlamaCppPlugin.java`'s Android JNI bridge (`jni.cpp`'s `apply_params_from_jsobject()`, lines
+  ~295–330) only reads `embedding`/`use_mmap`/`use_mlock`/`n_ctx`/`n_batch`/`n_gpu_layers` out of the
+  params object handed up from `LlamaCppCapacitorAdapter.loadModel()`. `n_threads`, `n_threads_batch`,
+  `n_ubatch`, `flash_attn`, `cache_type_k`/`cache_type_v` are silently dropped on Android — confirms
+  `n_threads` *did* reach native in the 2026-08-20 pass (it's in the read list), but `flashAttention`/
+  `kvCacheQuant` (perf-tuning plan §6, KV-cache quantization) never has and never will until this is
+  patched, regardless of what `LocalAiConfig.runtimeTuning` sets.
+- `n_gpu_layers = 0` is hardcoded in `jni.cpp`'s default `common_params`, and no GPU backend
+  (OpenCL/Vulkan) is in `CMakeLists.txt`'s `SOURCE_FILES` at all — the P80's Mali-G72 was never a
+  factor either way, confirming this is purely a CPU-kernel-selection issue.
+- Thread-count default (`cpu_get_num_math()`, `cpp/common.cpp`) is an x86-SMT-shaped heuristic
+  (`hardware_concurrency() > 4 ? n/2 : n`) applied uncritically on Android — lands on 4 for the P80's
+  8 logical cores, which happens to equal its real "big" A73 cluster size, but no
+  `cpu_params.cpumask` affinity is ever populated (`common.h:56`) to make that intentional rather than
+  coincidental.
+
+**Not fixed here** — user chose to log the finding only this session, not patch `llama-cpp-pro` yet.
+The natural fix, same `patch-package` convention as every other `llama-cpp-pro` fix in this ledger:
+drop `-DLM_GGML_CPU_GENERIC`, add `ggml-cpu/arch/arm/{quants.c,repack.cpp,cpu-feats.cpp}` to
+`CMakeLists.txt`'s `SOURCE_FILES`, and extend `apply_params_from_jsobject()` to also read
+`n_threads`/`n_threads_batch`/`n_ubatch`/`flash_attn`/`cache_type_k`/`cache_type_v` — then re-run this
+ledger's own "ADR 0008 §7" measurement method (adb logcat timestamps + SQLite pull) on the same P80 to
+get a real before/after number. Expect a real speedup from the SIMD fix; the `n_threads`/KV-cache-quant
+plumbing fix mostly unblocks perf-tuning plan §6 from being testable at all on Android, rather than
+being expected to move today's number on its own.
+
+### Patched native deps don't survive `local-ai`'s own future npm publish — chosen fix is a scoped fork (2026-08-21)
+
+**Context:** every `llama-cpp-pro` fix in this ledger so far (`sanitize_utf8()` truncation, the
+`"byte: \xNN"` leak, per-token `notifyListeners` wiring, the drafted iOS streaming patch) was applied
+via `patch-package` inside **`forta.chat`'s own** `node_modules`/`patches/` — never inside `local-ai`
+itself, since `local-ai` doesn't vendor or depend on `llama-cpp-pro` directly (it's the consumer app's
+peer choice of `LlmRuntimePort` adapter target). User asked, ahead of any real `npm publish` of
+`local-ai`, how a `pnpm patch`/`patch-package`-style fix to one of `local-ai`'s *own* dependencies would
+reach consumers who install `local-ai` from npm.
+
+**Finding:** it wouldn't, by default. `pnpm.patchedDependencies` and `patch-package`'s `patches/` are
+both local to whichever project's root `package.json` declares them — `local-ai`'s `files: ["dist"]`
+(`package.json`) means `patches/` never even ships in the published tarball, and even if it did, a
+downstream consumer's own package manager reads *its own* root `package.json`, not
+`node_modules/local-ai/package.json`'s `pnpm.patchedDependencies`/`overrides`, so nothing propagates
+transitively through a dependency.
+
+**Decision:** if `local-ai` itself ever needs a patched version of one of its own dependencies to ship
+correctly to npm consumers, the chosen path is **publish a patched fork under our own npm scope** and
+depend on that instead of upstream (e.g. `@<our-scope>/<package>-patched`), rather than relying on
+`pnpm patch`/`patch-package`/`overrides`, `bundledDependencies`, or a `github:`-URL dependency. Ranked
+alternatives from the discussion, for reference if the scoped-fork path turns out impractical for a
+given package: (1) upstream the fix and pin to the fixed release once out, (2) depend on a `github:` URL
+of a fork/branch directly (no npm publish needed, works with any package manager), (3) `bundledDependencies`
+(guarantees delivery but risks duplicate-version bloat in the consumer's tree) — all deferred in favor of
+the scoped fork as the default going forward.
+
+**Why:** matches the precedent already set for `llama-cpp-pro` (source-level native patches, not a
+config workaround) and gives a stable, versionable, `npm install`-able artifact that doesn't require
+consumers to use pnpm or add a `github:` dependency of their own — consistent with `local-ai` being a
+general-purpose npm package, not assuming a specific downstream package manager.
+
+**How to apply, when this is actually needed:** fork the target package under the project's npm scope,
+apply the fix as a normal commit (not a `.patch` file) so it's reviewable/maintainable like any other
+source, publish it, then point `local-ai`'s `package.json` dependency at the scoped fork's name/version
+instead of upstream. Revisit the fork against upstream on every upstream release to see if the patch has
+landed there and the fork can be dropped.
+
+### NEON/dotprod kernel fix device-verified — 2.2–2.7× real speedup on Qwen3-4B, closes the previous entry's open question (2026-08-21)
+
+**Context:** direct follow-up to this ledger's own "Android `.so` compiled with `-DLM_GGML_CPU_GENERIC`"
+entry above — that entry's fix (`forta.chat` commit `77307b95`, `patches/llama-cpp-pro+0.2.4.patch`)
+dropped the flag, added `ggml-cpu/arch/arm/{quants.c,repack.cpp,cpu-feats.cpp}` to
+`CMakeLists.txt`'s `SOURCE_FILES`, and extended `jni.cpp`'s `apply_params_from_jsobject()` to read
+`n_threads`/`n_ubatch`/`flash_attn`/`cache_type_k`/`cache_type_v` — committed as "not yet verified on
+device". This entry closes that gap: a real `assembleSideloadDebug`/install/measure pass on the same
+P80 as every prior entry in this ledger, same `adb logcat` + SQLite-pull method as the "ADR 0008 §7"
+baseline entry.
+
+**Build confirmed real, not cached**: `buildCMakeDebug[arm64-v8a]` ran actual `ninja`/`clang++`
+compilation (3 parallel `clang++` processes observed live via `Get-Process`, not `UP-TO-DATE`) — full
+`npm run cap:run` took 2m36s wall-clock for the native rebuild + gradle + install.
+
+**Method**: same as the baseline entry — `adb logcat` timestamps on `LlamaCpp`'s
+`Loading prompt into completion context...` → `Beginning completion generation...` →
+`Generated token N...` → `Reached end-of-generation`, cross-checked against a direct SQLite pull
+(`adb exec-out run-as com.forta.chat cat databases/local_ai_<id>SQLite.db`) — `chat_messages.token_count`
+matched the logcat token counter exactly (91 and 92) and `created_at` timestamps matched the logcat
+wall-clock to the millisecond after UTC+3 conversion, same cross-check discipline as the baseline entry.
+
+**Qwen3-4B Q4_K_M, warm 3-turn conversation, 280 prompt tokens** (comparable context depth to the
+baseline's own turn-2 measurement, 226 tokens — KV cache was cold for this run since switching the
+active model via the new multi-model-selection feature, see below, flushes it):
+
+| | Prefill | Prefill tok/s | Generated | Gen time | Generation tok/s |
+|---|---|---|---|---|---|
+| **Before** (baseline turn 2, 2026-08-20) | 226 tok | 159.8 s → 1.41 tok/s | 433 tok | 430.2 s | 1.01 tok/s |
+| **After** (this pass, 2026-08-21) | 280 tok | 74.95 s → **3.74 tok/s** | 91 tok | 38.43 s | **2.37 tok/s** |
+
+**Speedup: ~2.65× prefill, ~2.35× generation** (vs. baseline turn 2; ~2.0×/~2.2× vs. the shorter turn-1
+baseline). Real, but well short of the 3–10× the previous entry estimated for scalar→NEON — plausible
+explanations, not confirmed: this P80's Cortex-A73/A53 cores lack `dotprod`/`i8mm` entirely (only plain
+NEON), and/or memory-bandwidth (not compute) is now the binding constraint once the scalar bottleneck is
+gone, which would also explain why the `n_threads` pass earlier in this ledger found zero scaling — worth
+revisiting now that the SIMD path is real. Either way, the direction and rough magnitude confirm this
+entry's own hypothesis: the scalar-fallback kernel selection *was* the dominant factor, not just a
+secondary one.
+
+**Bonus data point, not a controlled comparison — Qwen3-1.7B Q4_K_M** (new model option, added by the
+unrelated multi-model-selection feature landed the same day; not part of the original baseline, and a
+genuinely smaller model, so this number is *not* directly comparable to the 4B before/after table above,
+just recorded since it was measured in the same session): fresh empty chat, 26 prompt tokens (of 40
+tokenized — some prefix reused from an idle KV state), 92 generated tokens —
+**7.62 tok/s prefill, 5.52 tok/s generation**. Gives a rough sense of the 1.7B/4B ratio on NEON-enabled
+hardware (~2×) for anyone choosing between the two models on this device class.
+
+**What this means for the original complaint**: still far from interactive — a short reply on the 4B
+model is ~40s of generation alone plus prefill, not the multi-minute wait the baseline had, but not fast
+either. The 1.7B option (now user-selectable via Settings → Local AI → "Переключиться") is the more
+practical default for weak devices like the P80 until further optimization (KV-cache quant, `n_ubatch`
+tuning — both now actually reach native thanks to this same fix, per the previous entry, and were not
+yet tuned/measured in this pass).
+
+## Electron desktop support (2026-08-29, requested — resolves §16.4)
+
+**Decision (asked directly by the product owner, not inferred):** `local-ai` will actively support
+Electron desktop apps — **Windows, macOS, and Linux** — as a **first-class inference target**, not the
+"degraded, no-inference" mode TZ §16 question 4 originally framed as the only alternative to "don't
+support it at all". Resolves ledger row #4 above. TZ bumped to v6 (header, §1 Non-goals, §2's target
+platform table, §4.1, §6.1) to keep the document from silently disagreeing with this decision, per
+CLAUDE.md's "never silently contradict or reinterpret the TZ" rule — see that diff for the exact
+wording change in each section.
+
+**Why this is a bigger decision than just flipping row #4 to "yes":** the TZ's original framing (§15
+row 8, "Web/Electron деградированный режим — SQL/чаты/downloads работают, инференса нет") assumed
+Electron would reuse the *same* constraint Web has: no native runtime plugin, so no local inference,
+ever. That assumption is wrong specifically for Electron (not for browser Web) because Electron ships a
+full Node.js runtime in its main process — the same environment `node-llama-cpp` already runs in for
+this repo's own tests (`src/adapters/node-testing/node-llama-cpp.adapter.ts`, per ADR 0001). Browser Web
+has no such escape hatch (no filesystem, no native bindings) and stays exactly as degraded as the TZ
+always said.
+
+**Model list ("модели обычно будут мощнее" — the product owner's own framing):** no new manifest schema
+needed. The multi-model manifest feature (`docs/plans/llama2/2026-08-21-multi-model-selection-plan.md`,
+`manifest.schema.ts`'s `models[]`/`embeddings[]` arrays, `ModelArtifact.recommended`,
+`maxModelParamsB` exclusion) already lets one manifest list several models of different sizes side by
+side. A desktop machine typically reports far more `totalRamGb`/`freeDiskBytes` than a phone, so
+`EligibilityService`'s existing RAM-based formula (TZ §6.2, `minRamGb ≈ ceil(sizeGB × 1.5)`) naturally
+qualifies larger, more capable models as `'ok'` on desktop that would read `'no'`/`'tight'` on most
+phones — the "different, usually more powerful list for Electron" the product owner asked for falls out
+of eligibility filtering over one shared manifest, not a platform-keyed manifest split. If a publisher
+later wants to *curate* (not just filter) a distinct desktop catalog, that's a manifest-hosting-side
+choice (serve a different `manifestUrl` to Electron builds) — no library change either way, so not
+scoped as a task.
+
+**Architecture — why this is "just another adapter set", not a new library shape:** the hexagonal
+boundary (CLAUDE.md, TZ §3) already isolates `core` from any specific host. Electron support is adding
+one more adapter implementation per port, run inside Electron's **main process** (not the renderer —
+the renderer has no direct native/filesystem access without the host app's own `contextBridge`/IPC
+wiring, which is the host Electron app's concern the same way a Capacitor app's WebView-to-native bridge
+is the host app's concern, not this library's). Concretely:
+- `LlmRuntimePort` → **not** `node-llama-cpp` (corrected same day, 2026-08-29, after actually reading
+  the installed `llama-cpp-pro@0.2.4` package rather than assuming from its README — see the entry
+  below). `llama-cpp-pro` — the same plugin this library already depends on for Android/iOS (ADR 0008)
+  — ships its own first-party Electron/desktop integration (`llama-cpp-pro/desktop`): a compiled-from-
+  source **sidecar process** (`sidecar/cap-sidecar-main.cpp`, built via the plugin's own
+  `build-variants.sh --variant desktop`) exposing an OpenAI-compatible local HTTP API, managed by the
+  plugin's own `sidecar-manager.cjs`/`gpu-probe.cjs`/`backend-selector.cjs` (CUDA/Vulkan/Metal/ROCm
+  detection and binary-variant selection). `local-ai`'s Electron `LlmRuntimePort` adapter is a **new**
+  adapter wrapping this sidecar directly (`createSidecarManager()`/`createSidecarClient()`), bypassing
+  the plugin's Capacitor-JS-bridge layer entirely (that layer exists for apps that want one uniform
+  Capacitor API across every platform; `local-ai` already runs in the main process regardless, so there
+  is nothing for that bridge to do here) — not a promotion of `NodeLlamaCppAdapter`, which stays exactly
+  what TZ §13.1 always said it was: a Node-side test/dev tool, never a production runtime.
+- `SqlitePort`, `FilesystemPort`, `DownloadTransportPort` (range-download) → unaffected by the correction
+  above, still real, working Node adapters (`NodeSqliteAdapter`, `NodeFsAdapter`,
+  `NodeRangeDownloadAdapter`), just currently labeled/exported as `node-testing`, not promoted to a
+  supported production path. `llama-cpp-pro/desktop` has no SQLite/filesystem/download story of its own
+  — those three ports have nothing to do with the inference plugin either way.
+- `PlatformSupportPort`, `DeviceInfoPort`, `AppLifecyclePort` → **genuinely new**, real adapters needed.
+  `node-testing`'s versions of these three are `Fake*Adapter`s built for unit-test fixtures, not real
+  desktop implementations (no real RAM/CPU detection, no real Electron `app` lifecycle events). This is
+  the actual net-new engineering work, not the inference/storage/download path.
+
+**Why not build a custom Electron-specific Capacitor bridge instead:** moot as of the correction above —
+`llama-cpp-pro` already solved this itself (its `desktop/` subsystem *is* its Electron answer, just not
+routed through Capacitor's plugin mechanism at all). Writing a from-scratch Electron-side implementation
+of the Capacitor native-plugin interface would only make sense if the plugin had no desktop story of its
+own; it does, so `local-ai`'s job is to consume `llama-cpp-pro/desktop`'s primitives directly, the same
+posture it already takes toward the plugin's Android/iOS native code today.
+
+**Residual risk / what's not yet known — expanded after reading the actual package:**
+1. Sidecar binary provenance/CI cost (ledger row #24) — the npm package ships `sidecar/CMakeLists.txt`/
+   `cap-sidecar-main.cpp` (source), not prebuilt binaries for arbitrary consumers; `stage-desktop-
+   resources.cjs`/`electron-builder.config.cjs` assume the binaries already exist under
+   `extraResources/sidecar/<platform>-<arch>[-<backend>]`, built beforehand via the plugin's own
+   `build-variants.sh --variant desktop`. Cross-compiling C++ with CUDA/Vulkan/Metal/ROCm toolchains for
+   three OSes is a real, non-trivial CI investment — needs a decision on who builds these and when
+   (every `local-ai` release? the host app's own CI? vendored from the plugin author if they publish
+   prebuilt artifacts somewhere not yet found?).
+2. Streaming support (ledger row #23) — confirmed by reading `sidecar-client.cjs`: its `chatCompletion()`/
+   `completion()` helpers buffer the entire HTTP response (`res.on('data')` collected into one
+   `Buffer.concat`, one `JSON.parse` at the end) and never parse SSE — genuinely unknown whether the
+   sidecar's own HTTP server (`cap-sidecar-main.cpp`) supports `stream: true` at all versus this being a
+   convenience-wrapper limitation only. `local-ai`'s per-token `CompletionStream` contract needs this
+   resolved before the Electron `LlmRuntimePort` adapter can be written for real — if the sidecar can't
+   stream, the adapter may need to emit the full response as one synthetic chunk (same documented fallback
+   ADR 0001 already describes for Android's `onToken` gap) rather than genuine per-token delivery.
+3. `PlatformSupportPort.isPluginAvailable()`'s `inference` semantics on Electron aren't the unconditional
+   `true` an earlier draft of this entry assumed — they depend on whether a sidecar binary for the
+   current OS/arch/backend actually resolves (`llama-cpp-pro/desktop`'s `resolveBinaryPath()`/
+   `assertSidecarBinary()`), which in turn depends on point 1 above having been solved for that build.
+
+See `ROADMAP.md`'s "Electron desktop support" section for the spike breakdown covering all three; no
+adapter code was written in this session — this entry and the TZ v6 diff are the decision + corrected
+plan, not the implementation.

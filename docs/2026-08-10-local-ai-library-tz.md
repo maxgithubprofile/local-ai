@@ -1,13 +1,31 @@
 # Техническое задание: `local-ai` — TS/Capacitor-библиотека офлайн-ассистента
 
-**Дата:** 2026-08-10, §10 синхронизирован 2026-08-11 (обновлено — v5: §10 «Публичный API» сведён с фактической
+**Дата:** 2026-08-10, §10 синхронизирован 2026-08-11 (обновлено — v6, 2026-08-29: **Electron-десктоп
+(Windows/macOS/Linux) переведён из «Non-goals/деградированный режим» в первоклассную (не деградированную)
+целевую платформу** — продуктовое решение владельца, закрывает §16 вопрос #4 (`docs/decisions.md` #4,
+`Resolved`). Инференс на Electron идёт через **`llama-cpp-pro`'s собственную desktop-подсистему**
+(`llama-cpp-pro/desktop` — компилируемый сайдкар-процесс с OpenAI-совместимым HTTP API + GPU-детект/
+выбор бэкенда), а не через `node-llama-cpp` (тот остаётся только Node-side тестовым `LlmRuntimePort`-
+адаптером, §13.1, без изменений) и не через Capacitor native-мост (которого на Electron нет). Уточнено
+позже в тот же день после чтения распакованного `llama-cpp-pro@0.2.4` (не только README) — см. §4.1 для
+полной механики и найденный риск (сайдкарный HTTP-клиент пакета не стримит, нужен собственный SSE-путь
+для per-token `CompletionStream`). Манифест для десктопа обычно содержит более мощные модели того же
+`models[]`/`recommended`-механизма (см. multi-model-план от 2026-08-21) — никакой отдельной схемы не
+потребовалось. Правки: §1 Non-goals, §2 (таблица целевой среды), §4.1 (Electron-путь инференса через
+`llama-cpp-pro/desktop`, плюс замечание, что раздел уже был устаревшим по имени пакета до ADR 0008),
+§6.1 (`PlatformSupportPort`/`getPlatform()` включают `'electron'` как настоящую, не деградированную
+платформу; `isPluginAvailable()`'s `inference`-семантика на Electron уточнена — зависит от резолва
+бинарника сайдкара, не безусловна). Полный список задач — `ROADMAP.md`'s «Electron desktop support»
+раздел. Web (браузер, вне Electron) остаётся деградированным без изменений — это решение только про
+Electron;
+предыдущее — v5: §10 «Публичный API» сведён с фактической
 публичной поверхностью после Phase 8/security-hardening/logging — `ChatSearchApi.searchMessages()`,
 `ChatExportApi.exportChat()`/`exportChats()`, `ConversationSyncApi.updateMessage()`/`deleteMessages()`,
 `LogExportApi.exportLogs()`/`clearLogs()`, `LocalAiConfig.logging`, `chat-search:fallback-active`
 событие — ни один из них не был описан в v4, хотя все реализованы и покрыты тестами; см.
 `docs/decisions.md`'s «External consumer feedback review (2026-08-11)», пункт #3, откуда взят этот
 апдейт. Никакой из уже описанных v4-контрактов при этом не менялся — только добавлены пропущенные;
-предыдущее — v4: учтена внешняя рецензия `docs/corrections.txt` — явный `CompletionStream` вместо гибридного типа, разделение MVP/advanced conversation API, жёсткая защита от рассинхрона векторного пространства, `releaseRuntime()` вместо `unloadAll()`, параметры сэмплинга и chat-template, политика контекстного окна, семантика отмены/сбоя; ранее — v3: проверка поддержки платформы/плагинов, device eligibility, download-плагин, независимое версионирование эмбеддинга, множественные чаты с внешней синхронизацией истории)
+ранее — v4: учтена внешняя рецензия `docs/corrections.txt` — явный `CompletionStream` вместо гибридного типа, разделение MVP/advanced conversation API, жёсткая защита от рассинхрона векторного пространства, `releaseRuntime()` вместо `unloadAll()`, параметры сэмплинга и chat-template, политика контекстного окна, семантика отмены/сбоя; ранее — v3: проверка поддержки платформы/плагинов, device eligibility, download-плагин, независимое версионирование эмбеддинга, множественные чаты с внешней синхронизацией истории)
 **Статус:** черновик ТЗ для реализации (готов к работе Claude/разработчиков)
 **Автор:** составлено на основе `docs/initial/*` + дополнительного исследования
 **Целевой читатель:** LLM/разработчик, который будет писать код библиотеки с нуля
@@ -63,7 +81,11 @@
 - Фиксированные device-тиры (`low/mid/high`) — вместо них декларативные пороги + измерение конкретного устройства, см. §6.
 - Готовый RAG-пайплайн (chunking, ranking, prompt-assembly) — только строительные блоки (embedding + vector search).
 - Синхронизация чатов между устройствами / бэкап в облако.
-- Web/Electron полноценный инференс (см. §4.1, §6 — деградация/заглушка, но она теперь программно детектируется через `checkSupport()`, а не просто документирована словами).
+- Полноценный инференс в браузерном Web (не Electron) — остаётся деградацией/заглушкой (см. §4.1, §6),
+  программно детектируемой через `checkSupport()`, а не просто документированной словами.
+  **Electron-десктоп (Windows/macOS/Linux) выведен из этого пункта v6 (2026-08-29,
+  `docs/decisions.md` #4) — там инференс полноценный**, см. §2/§4.1/§6.1 и `ROADMAP.md`'s «Electron
+  desktop support».
 - Цензурные каналы дистрибуции, возрастные тумблеры, App Store/Play policy-логика.
 
 ---
@@ -74,8 +96,9 @@
 |---|---|
 | Язык | TypeScript, `strict: true`, ES2022 target, публикуется как ESM + CJS (dual build) |
 | Платформа-хост | Capacitor **8.x** (peer dependency, `>=8.0.0`) |
-| Целевые ОС | Android (minSdk по требованиям native-плагина инференса, обычно 24+), iOS 15+ |
-| Web/Electron | Деградированный режим: библиотека не падает при импорте; `checkSupport()` (§6.1) явно сообщает, какие возможности недоступны. Инференс на web в v1 не работает (§4.1); SQL/Download/Conversations — потенциально доступны, если используемые плагины сами поддерживают web (уточняется по каждому плагину в Phase 0) |
+| Целевые ОС | Android (minSdk по требованиям native-плагина инференса, обычно 24+), iOS 15+, **Electron-десктоп: Windows/macOS/Linux (v6, 2026-08-29 — см. ниже)** |
+| Electron (v6, 2026-08-29) | **Первоклассная (не деградированная) платформа** — `docs/decisions.md` #4, `Resolved`. Полный набор возможностей, включая `inference`, доступен через отдельный набор Node-адаптеров, исполняемых в Electron **main-процессе** (не в renderer — там нет прямого доступа к нативным биндингам без собственного IPC-моста хост-приложения, который остаётся вне ответственности библиотеки, как и любой другой UI/bridge-слой). Инференс — не через `llama-cpp-capacitor` (тот требует Capacitor native-мост, Android/iOS-only), а через `node-llama-cpp` напрямую (тот же путь, что §13.1 всегда описывал как Node-side test-адаптер, здесь становится продакшен-адаптером). Манифест для десктопных сборок обычно перечисляет более мощные модели в том же `models[]` (multi-model-манифест, 2026-08-21) — eligibility (§6.2) по факту большего `totalRamGb` десктопа сама выбирает их как проходные, отдельная схема манифеста не нужна. Детали и разбивка задач — `ROADMAP.md`'s «Electron desktop support». |
+| Web (браузер, не Electron) | Деградированный режим, без изменений: библиотека не падает при импорте; `checkSupport()` (§6.1) явно сообщает, какие возможности недоступны. Инференс на web в v1 не работает (§4.1); SQL/Download/Conversations — потенциально доступны, если используемые плагины сами поддерживают web (уточняется по каждому плагину в Phase 0) |
 | Пакетный менеджер разработки | pnpm (workspaces, если решим на монорепо — см. §16) |
 | Сборка | `tsup` или `unbuild` → ESM/CJS/`d.ts`, sourcemaps |
 | Тесты | Vitest или Jest (см. §13) — выбрать один, не смешивать |
@@ -205,15 +228,65 @@ local-ai/
 
 ### 4.1 Инференс (LLM + embedding)
 
-**Кандидат №1: `llama-cpp-capacitor`** (пакет `arusatech/llama-cpp` на npm, версия на момент исследования — `0.1.5`). Даёт из коробки `initLlama`, `completion` (стрим), `embedding`, `release`/`releaseAllLlama`, `stopCompletion`, `saveSession`/`loadSession` (используется механикой множественных чатов, §9.3), `loadLlamaModelInfo`. LoRA есть в API, но библиотека им **не пользуется**. **Web не поддержан** в 0.1.5 — прямое следствие для §6 (checkSupport должен явно об этом сообщать).
+**Кандидат №1 (выбран): `llama-cpp-capacitor`** (пакет `arusatech/llama-cpp` на npm, версия на момент исследования — `0.1.5`). Даёт из коробки `initLlama`, `completion` (стрим), `embedding`, `release`/`releaseAllLlama`, `stopCompletion`, `saveSession`/`loadSession` (используется механикой множественных чатов, §9.3), `loadLlamaModelInfo`. LoRA есть в API, но библиотека им **не пользуется**. **Web не поддержан** в 0.1.5 — прямое следствие для §6 (checkSupport должен явно об этом сообщать).
 
-Phase 0 спайк обязателен: реальная сигнатура методов может отличаться от README. Запасной вариант — `llama-cpp-pro` или собственный тонкий native-плагин.
+**Переименован в `llama-cpp-pro` (2026-08-20, ADR 0008)** — тот же проект/автор, тот же API
+(`docs/adr/0008-llama-cpp-pro-migration.md`: «Same project, renamed» — `CHANGELOG.md`'s `[Unreleased]`
+секция подтверждает переезд репозитория с `llama-cpp-capacitor`/`annadata-llama-cpp`). Адаптер
+(`src/adapters/capacitor/llama-cpp-capacitor.adapter.ts`, класс `LlamaCppCapacitorAdapter` — имя файла/
+класса **не переименовано**, только источник импорта; переименование самого адаптера не сделано,
+т.к. это публичный экспорт и правило CLAUDE.md требует не трогать такое без явного запроса) и
+зависимость в `package.json` уже используют `llama-cpp-pro@^0.2.4`. Везде ниже по документу и в
+`ROADMAP.md`, где написано `llama-cpp-capacitor`, имеется в виду этот же пакет под текущим именем —
+исторические записи (ADR 0001, `ROADMAP.md`'s Phase 0 task 0.1) оставлены как есть, это точный отчёт
+о том, что было верно на момент спайка 2026-08-10, до переименования.
+
+**Electron (v6, 2026-08-29; архитектура уточнена 2026-08-29 после чтения распакованного
+`llama-cpp-pro@0.2.4`, не только README):** `llama-cpp-pro` **сам заявляет и реализует** поддержку
+Electron — не как обёртку над Capacitor native-мостом (которого на Electron нет и не может быть), а
+через собственную desktop-подсистему пакета (`llama-cpp-pro/desktop`): компилируемый из исходников
+(`sidecar/CMakeLists.txt` + `cap-sidecar-main.cpp`) **сайдкар-процесс** — локальный HTTP-сервер с
+OpenAI-совместимым API (`POST /v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, плюс
+служебные `/v1/internal/models/load`, `DELETE /v1/internal/models/:id`, `/v1/internal/context-limit`,
+`/v1/internal/memory`, `GET /health`), которым управляет `sidecar-manager.cjs` (старт/стоп/health-poll),
+а общается с ним `sidecar-client.cjs` — тонкий Node-`http`-клиент на `127.0.0.1:{port}`. Отдельно пакет
+детектирует GPU (`gpu-probe.cjs`: `nvcuda.dll`/`libcuda.so` для CUDA, `vulkan-1.dll`/`libvulkan.so` для
+Vulkan, Metal — всегда на macOS) и выбирает бинарный вариант сайдкара под конкретный бэкенд
+(`backend-selector.cjs`: `metal`/`cuda`/`vulkan`/`vulkan-openblas`/`cuda-openvino`/`metal-coreml`/ROCm),
+с ручным оверрайдом пользователя. Своя `desktop/electron-builder.config.cjs` и
+`scripts/stage-desktop-resources.cjs` дают готовый (но не автоматический — бинарники под каждую ОС/
+архитектуру/бэкенд нужно **собрать заранее** через пакетный `build-variants.sh --variant desktop`)
+рецепт упаковки через `electron-builder`.
+
+**Следствие для `local-ai`'s `LlmRuntimePort`:** это НЕ переиспользование `node-llama-cpp` (Node-side
+тестовый адаптер §13.1 остаётся тестовым инструментом, не продакшен-путём для Electron — эта запись
+исправляет ошибочное предположение более ранней версии этого раздела). Электронный адаптер — новый
+(не промоушен существующего Node-testing адаптера), оборачивающий `llama-cpp-pro/desktop`'s
+`detectBackend()`/`createSidecarManager()`/`createSidecarClient()` напрямую, минуя Capacitor-JS-слой
+плагина (тот нужен только приложениям, гоняющим единый Capacitor-бридж на всех платформах; `local-ai`
+и так исполняется в Electron main-процессе, см. §6.1). **Важная находка:** `sidecar-client.cjs`'s
+`chatCompletion()`/`completion()` — небуферизованные (собирают весь HTTP-ответ целиком через
+`res.on('data')`+`Buffer.concat`, затем один `JSON.parse`) — то есть **не стримят**. Пословный
+(per-token) `CompletionStream` (TZ-требование, подтверждено визуально на Android — см.
+`docs/decisions.md`) на Electron потребует собственного SSE-клиента адаптера поверх того же
+`/v1/chat/completions?stream=true`, а `sidecar-client.cjs` использовать только для нестримингового
+admin-API (`loadModel`/`unloadModel`/`memory`/`setContextLimit`/`health`) — не подтверждено, что
+`stream: true` вообще поддерживается сайдкаром на уровне HTTP; открытый вопрос, см.
+`docs/decisions.md` ленджер #23.
+
+`PlatformSupportPort.isPluginAvailable()`/`capabilities.inference` на Electron — не безусловный `true`:
+зависит от того, резолвится ли `llama-cpp-pro/desktop`'s `resolveBinaryPath()`/`assertSidecarBinary()`
+для текущих OS/arch (собранный ли под них бинарник сайдкара вообще заложен в упакованное приложение),
+см. §6.1.
+
+Полная разбивка задач и спайков (сборка сайдкара под три ОС, стриминг, лицензия/происхождение
+бинарников) — `ROADMAP.md`'s «Electron desktop support», Phase 0.
 
 `LlmRuntimePort` не содержит LoRA-специфичных полей — замена нативного плагина не потребует переписывать бизнес-логику.
 
 **Chat template — не забота приложения.** `complete()`/`sendMessage()` (§10) принимают только структурированные `messages: { role, content }[]`, библиотека **никогда** не отдаёт наружу API для склеивания сырого текстового промпта. Разные семейства моделей (Qwen, Llama, Gemma, Mistral) форматируют историю по-разному (спецтокены, порядок ролей, system-обёртка), и это не должно быть обязанностью кода приложения — иначе смена модели в манифесте молча ломает качество ответов у всех потребителей библиотеки. Механизм (уточняется в Phase 0 спайке):
 
-1. **Основной путь** — GGUF-файлы, сконвертированные из HF, обычно несут `tokenizer.chat_template` (Jinja2) прямо в метаданных; сам `llama.cpp` умеет применять такой шаблон нативно (`llama_chat_apply_template`, свой Jinja-движок `minja`, без Python). Если native-плагин (`llama-cpp-capacitor`) принимает `messages` и сам вызывает эту машинерию — библиотеке достаточно передавать `messages` как есть.
+1. **Основной путь** — GGUF-файлы, сконвертированные из HF, обычно несут `tokenizer.chat_template` (Jinja2) прямо в метаданных; сам `llama.cpp` умеет применять такой шаблон нативно (`llama_chat_apply_template`, свой Jinja-движок `minja`, без Python). Если native-плагин (`llama-cpp-pro`, см. выше) принимает `messages` и сам вызывает эту машинерию — библиотеке достаточно передавать `messages` как есть.
 2. **Фолбэк** — если плагин этого не делает или GGUF не несёт шаблон, `ModelArtifact.chatTemplate` (§5.2) явно называет пресет (`'qwen'`/`'llama3'`/`'gemma'`/`'mistral'`/`'raw'`), и `RuntimeFacade` сама собирает форматированный промпт по небольшому встроенному реестру шаблонов перед вызовом низкоуровневого `prompt`-режима плагина.
 
 Поток всегда: `messages` + `ModelArtifact` → `RuntimeFacade` (выбирает механизм 1 или 2) → нативный плагин. Приложение видит только `messages` на входе и токены/финальное сообщение на выходе.
@@ -384,10 +457,19 @@ refreshManifest()
 
 ```ts
 export interface PlatformSupportPort {
+  /** True на Android/iOS native-сборках **и** на Electron main-процессе (v6, 2026-08-29 —
+   *  `docs/decisions.md` #4); false на браузерном web (не Electron). */
   isNativePlatform(): boolean;
-  getPlatform(): 'ios' | 'android' | 'web' | string;
+  getPlatform(): 'ios' | 'android' | 'web' | 'electron' | string;
   /** Обёртка над Capacitor.isPluginAvailable(name) — официальный, задокументированный
-   *  способ Capacitor проверить, зарегистрирован ли нативный плагин в текущей сборке. */
+   *  способ Capacitor проверить, зарегистрирован ли нативный плагин в текущей сборке.
+   *  На Electron нет Capacitor native-моста/плагинов вообще — `ElectronPlatformSupportAdapter`
+   *  (см. ROADMAP.md's «Electron desktop support») не оборачивает `isPluginAvailable`, а
+   *  проверяет каждую capability по своим правилам: `sql`/`download`/`fs` — всегда `true`
+   *  (чистый Node, всегда доступен в main-процессе); `inference` — зависит от того, резолвится
+   *  ли `llama-cpp-pro/desktop`'s `assertSidecarBinary()` для текущих OS/arch (собран ли под
+   *  них бинарник сайдкара и заложен ли в упакованное приложение, §4.1) — то есть **не**
+   *  безусловный `true`, в отличие от `sql`/`download`/`fs`. */
   isPluginAvailable(pluginName: string): boolean;
 }
 ```
@@ -398,7 +480,7 @@ export interface PlatformSupportPort {
 export type Capability = 'inference' | 'sql' | 'vectorSearch' | 'download' | 'deviceInfo';
 
 export interface SupportReport {
-  platform: 'ios' | 'android' | 'web' | 'unknown';
+  platform: 'ios' | 'android' | 'web' | 'electron' | 'unknown';
   isNative: boolean;
   capabilities: Record<Capability, boolean>;
   missingPlugins: Array<{ capability: Capability; pluginName: string; required: boolean }>;

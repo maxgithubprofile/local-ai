@@ -17,7 +17,6 @@ an agent should guess past even with a "smallest reasonable assumption" placehol
 |---|---|---|
 | 1 | npm package name/scope + library license (interacts with the MPL-2.0 downloader dependency, see README's "License note") | [`docs/decisions.md` #1](decisions.md) |
 | 2 | Concrete default model + embedding (HF repo, commit SHA, embedding hosting, calibrated `minRamGb`/`recommendedRamGb`) | [#2](decisions.md), [#3](decisions.md) |
-| 4 | Whether to actively support degraded Web/Electron at all | [#4](decisions.md) |
 | 6 | Chat/message count or size limits | [#6](decisions.md) |
 | 9 | Retention policy for `previousModels[]`/`previousEmbeddings[]` | [#9](decisions.md) |
 | 10 | Local DB encryption (SQLCipher) | [#10](decisions.md) |
@@ -55,6 +54,10 @@ No product decision or device needed; tracked in `ROADMAP.md`'s "External feedba
 - **FB.7** Fill in the "Calibrated thresholds" table in
   [`docs/guides/support-and-eligibility.md`](guides/support-and-eligibility.md) — table exists, needs
   device-side #4 above run first to have real numbers to put in it.
+- **Electron desktop support** (row #4 above, resolved 2026-08-29 — see `docs/decisions.md`'s "Electron
+  desktop support" entry) — full task breakdown in `ROADMAP.md`'s "Electron desktop support" section.
+  Starts with a Phase 0-style native-module-packaging spike, same as any other native-dependency risk
+  in this project; not yet started.
 
 ## How to use this file
 
