@@ -8,9 +8,6 @@ importers:
 
   .:
     dependencies:
-      '@capacitor/core':
-        specifier: '>=8.0.0'
-        version: 8.5.0
       '@noble/hashes':
         specifier: ^2.3.0
         version: 2.3.0
@@ -21,6 +18,9 @@ importers:
       '@capacitor/app':
         specifier: ^8.1.1
         version: 8.1.1(@capacitor/core@8.5.0)
+      '@capacitor/core':
+        specifier: ^8.5.0
+        version: 8.5.0
       '@capacitor/filesystem':
         specifier: ^8.1.2
         version: 8.1.2(@capacitor/core@8.5.0)

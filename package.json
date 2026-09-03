@@ -96,6 +96,7 @@
   "devDependencies": {
     "@capacitor-community/sqlite": "^8.1.1",
     "@capacitor/app": "^8.1.1",
+    "@capacitor/core": "^8.5.0",
     "@capacitor/filesystem": "^8.1.2",
     "@capgo/capacitor-device-info": "^8.0.10",
     "@capgo/capacitor-downloader": "^8.1.31",
