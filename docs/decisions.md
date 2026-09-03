@@ -743,6 +743,39 @@ the edited tree. `forta.chat`'s three coexisting lockfiles (`package-lock.json`,
 which doesn't even list `llama-cpp-pro`, evidently stale — and `yarn.lock`) are a related, separate
 risk worth cleaning up to one canonical package manager, independent of this patch.
 
+### Missing `@capacitor/core` devDependency broke `npm ci` for git-dependency consumers (2026-09-03)
+
+**Context:** Direct follow-up to the "add prepare script" entry above. That entry's own verification
+(`rm -rf node_modules/local-ai && npm install` inside forta.chat, a real `npm` install) passed — but a
+real GitHub Actions run of forta.chat's own CI failed anyway, on `npm error ... Cannot find module
+'@capacitor/core'` inside the `prepare` script's `tsup` DTS build.
+
+**Root cause:** every peer dependency this package declares was already duplicated into
+`devDependencies` so the package's own build/typecheck could resolve it standalone — except
+`@capacitor/core` itself, apparently an oversight. `pnpm install` in this repo silently papered over
+the gap (pnpm auto-installs peer dependencies by default), so every local verification this session —
+including the "add prepare script" entry's own forta.chat re-install — passed. What that verification
+missed: npm's git-dependency flow clones the dependency into an *isolated* temp directory and installs
+only *that* directory's own `dependencies`+`devDependencies` before running `prepare` — there is no
+peer-dependency auto-resolution in that isolated context the way there is in a normal top-level
+`pnpm install`. A previous re-install inside forta.chat didn't catch this either, because forta.chat's
+own `dependencies` already include `@capacitor/core` for its own purposes, and that satisfied the
+resolution incidentally in that specific tree — it would not be true for every consumer.
+
+**Fix:** added `"@capacitor/core": "^8.5.0"` to `devDependencies` (matching the version already
+resolved via other `@capacitor/*` peer packages' own dependency chains, per `pnpm-lock.yaml`).
+
+**Verified properly this time** — reproduced the actual failure mode, not just re-ran the same
+insufficient check: fresh `git clone` of this repo into a scratch directory, `rm -rf node_modules`,
+plain `npm install` (no pnpm anywhere in the loop) → `dts build` now succeeds. This is the same
+sequence npm runs internally for any consumer's `github:owner/local-ai#<ref>` git dependency.
+
+**Process lesson:** verifying a fix by re-running it inside the one consumer repo already on hand isn't
+sufficient when the thing being fixed is specifically about *isolated* dependency resolution — that
+consumer's own tree can accidentally satisfy the gap for reasons unrelated to the fix. Reproduce the
+isolated-install shape itself (fresh clone, fresh `node_modules`, the actual package manager the CI
+uses) before calling a fix confirmed.
+
 ### `llama-cpp-pro` moved from `patch-package` to a real fork (2026-09-03)
 
 **Context:** Direct follow-up, same day. The `contextId`-drift bug two entries above — a real,
